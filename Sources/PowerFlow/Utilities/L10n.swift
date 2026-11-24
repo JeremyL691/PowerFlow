@@ -13,6 +13,7 @@ enum L10n {
         case flowAdapterBypass
         case flowAdapterCharging
         case flowAdapterBatteryHybrid
+        case flowBatteryWhilePluggedIn
         case flowBatteryOnly
         case flowConnectingAC
         case flowUnknown
@@ -152,6 +153,7 @@ enum L10n {
         case .flowAdapterBypass: return isZh ? "电源适配器直供" : "Power Adapter"
         case .flowAdapterCharging: return isZh ? "正在充电" : "Charging"
         case .flowAdapterBatteryHybrid: return isZh ? "混合供电" : "Hybrid Power"
+        case .flowBatteryWhilePluggedIn: return isZh ? "已接电源 · 用电池" : "Plugged In · On Battery"
         case .flowBatteryOnly: return isZh ? "电池供电" : "On Battery"
         case .flowConnectingAC: return isZh ? "正在连接电源…" : "Connecting Power…"
         case .flowUnknown: return isZh ? "状态未知" : "Unavailable"
@@ -267,6 +269,7 @@ enum L10n {
         case .adapterBypass: return string(.flowAdapterBypass, language: language)
         case .adapterCharging: return string(.flowAdapterCharging, language: language)
         case .adapterBatteryHybrid: return string(.flowAdapterBatteryHybrid, language: language)
+        case .batteryWhilePluggedIn: return string(.flowBatteryWhilePluggedIn, language: language)
         case .batteryOnly: return string(.flowBatteryOnly, language: language)
         case .connectingAC: return string(.flowConnectingAC, language: language)
         case .unknown: return string(.flowUnknown, language: language)
@@ -297,8 +300,22 @@ enum L10n {
         }
     }
 
+    static func deviceName(for port: OutboundPortPower, language: AppLanguage = .system) -> String {
+        if let name = port.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            switch name {
+            case "External Display": return string(.externalDisplay, language: language)
+            case "USB-C Device": return string(.usbcDevice, language: language)
+            default: return name
+            }
+        }
+        return string(port.isDisplayPortActive ? .externalDisplay : .usbcDevice, language: language)
+    }
+
     static func chargingHold(_ reason: String, chargeLimitPercent: Int, language: AppLanguage = .system) -> String {
         let lower = reason.lowercased()
+        if lower.contains("draining") {
+            return tr("Draining to \(chargeLimitPercent)%", zh: "放电至 \(chargeLimitPercent)%", language: language)
+        }
         if lower.contains("optimized") {
             return string(.limitSourceOptimized, language: language)
         }

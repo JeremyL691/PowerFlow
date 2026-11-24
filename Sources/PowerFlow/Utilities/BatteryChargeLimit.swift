@@ -4,6 +4,8 @@ import Foundation
 struct BatteryChargeLimitInfo: Sendable, Equatable, Hashable {
     let limitPercent: Int
     let source: BatteryChargeLimitSource
+    /// The battery is deliberately run down to the limit while a charger is connected.
+    var drainsToLimit = false
 
     static let unlimited = BatteryChargeLimitInfo(limitPercent: 100, source: .none)
 }
@@ -20,14 +22,18 @@ enum BatteryChargeLimitResolver {
     static func resolve(
         notChargingReason: Int?,
         alDenteLimit: Int? = nil,
-        macOSLimit: Int? = nil
+        systemPolicy: SystemChargePolicy? = nil
     ) -> BatteryChargeLimitInfo {
         if let alDenteLimit, (20...99).contains(alDenteLimit) {
             return BatteryChargeLimitInfo(limitPercent: alDenteLimit, source: .alDente)
         }
 
-        if let macOSLimit, (50...99).contains(macOSLimit) {
-            return BatteryChargeLimitInfo(limitPercent: macOSLimit, source: .macOSSetting)
+        if let systemPolicy {
+            return BatteryChargeLimitInfo(
+                limitPercent: systemPolicy.limitPercent,
+                source: systemPolicy.isManual ? .macOSSetting : .optimizedCharging,
+                drainsToLimit: systemPolicy.drainsToLimit
+            )
         }
 
         if ((notChargingReason ?? 0) & optimizedChargingMask) != 0 {
@@ -40,12 +46,13 @@ enum BatteryChargeLimitResolver {
         return .unlimited
     }
 
-    /// Read-only convenience wrapper that adds AlDente's configured limit while AlDente is running.
-    /// Never spawns subprocesses or writes defaults.
+    /// Read-only convenience wrapper that adds the limit macOS enforces and, while AlDente is running,
+    /// its configured limit. Never spawns subprocesses or writes defaults.
     static func resolveWithSystemDefaults(notChargingReason: Int?) -> BatteryChargeLimitInfo {
         resolve(
             notChargingReason: notChargingReason,
-            alDenteLimit: readAlDenteChargeLimit()
+            alDenteLimit: readAlDenteChargeLimit(),
+            systemPolicy: SystemChargePolicyReader.shared.currentPolicy()
         )
     }
 

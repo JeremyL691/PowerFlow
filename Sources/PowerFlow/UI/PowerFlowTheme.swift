@@ -9,12 +9,6 @@ enum PowerFlowTheme {
             : Color(red: 0.720, green: 0.575, blue: 0.140)
     }
 
-    static func acGoldGlow(for scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color(red: 0.992, green: 0.960, blue: 0.790)
-            : Color(red: 0.880, green: 0.745, blue: 0.280)
-    }
-
     static func chargeGreen(for scheme: ColorScheme) -> Color {
         scheme == .dark
             ? Color(red: 0.235, green: 0.845, blue: 0.485)
@@ -33,28 +27,10 @@ enum PowerFlowTheme {
             : Color(red: 0.025, green: 0.520, blue: 0.760)
     }
 
-    static func systemIndigo(for scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color(red: 0.530, green: 0.590, blue: 1.000)
-            : Color(red: 0.290, green: 0.350, blue: 0.820)
-    }
-
-    static func displayViolet(for scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color(red: 0.760, green: 0.540, blue: 0.980)
-            : Color(red: 0.540, green: 0.270, blue: 0.780)
-    }
-
     static func warningRed(for scheme: ColorScheme) -> Color {
         scheme == .dark
             ? Color(red: 1.000, green: 0.340, blue: 0.310)
             : Color(red: 0.830, green: 0.165, blue: 0.145)
-    }
-
-    static func cardFill(for scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color(white: 0.11).opacity(0.68)
-            : Color.white.opacity(0.74)
     }
 
     static func nestedTileFill(for scheme: ColorScheme) -> Color {
@@ -63,32 +39,9 @@ enum PowerFlowTheme {
             : Color.black.opacity(0.045)
     }
 
-    static func pillFill(for scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color(white: 0.09).opacity(0.82)
-            : Color.black.opacity(0.055)
-    }
-
-    static func cardBorderGradient(for scheme: ColorScheme) -> LinearGradient {
-        if scheme == .dark {
-            return LinearGradient(
-                colors: [
-                    Color.white.opacity(0.16),
-                    Color.white.opacity(0.06)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        } else {
-            return LinearGradient(
-                colors: [
-                    Color.black.opacity(0.08),
-                    Color.black.opacity(0.13)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
+    /// Opaque enough that links appear to end at a node's edge.
+    static func nodeFill(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(white: 0.13) : Color(white: 0.97)
     }
 
     static func hairlineDivider(for scheme: ColorScheme) -> Color {
@@ -129,38 +82,6 @@ enum PowerFlowTheme {
         case .unknown:
             return "powerplug.fill"
         }
-    }
-}
-
-struct PowerFlowCardContainer<Content: View>: View {
-    @Environment(\.colorScheme) private var colorScheme
-    let cornerRadius: CGFloat
-    let padding: CGFloat
-    let content: Content
-
-    init(
-        cornerRadius: CGFloat = 16,
-        padding: CGFloat = 16,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.cornerRadius = cornerRadius
-        self.padding = padding
-        self.content = content()
-    }
-
-    var body: some View {
-        content
-            .padding(padding)
-            .background {
-                // The window already provides the blurred backdrop; a second material or a shadow per
-                // card would make the window server recomposite the whole window on every change.
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(PowerFlowTheme.cardFill(for: colorScheme))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(PowerFlowTheme.cardBorderGradient(for: colorScheme), lineWidth: 0.75)
-            }
     }
 }
 

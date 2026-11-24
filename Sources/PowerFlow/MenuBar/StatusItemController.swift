@@ -302,7 +302,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
     private static func compactWattsText(for snapshot: PowerSnapshot) -> String {
         guard snapshot.isDataAvailable else { return "--W" }
         let watts: Double
-        if snapshot.isEffectivelyOnAC {
+        if snapshot.isAdapterSupplyingPower {
             watts = snapshot.adapterInputPowerW > 0.05
                 ? snapshot.adapterInputPowerW
                 : snapshot.totalSystemLoadW
@@ -323,7 +323,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
 
         var parts: [String] = [appName, PowerFormatters.percent(snapshot.batteryPercent)]
 
-        if snapshot.isEffectivelyOnAC {
+        if snapshot.isAdapterSupplyingPower {
             let portLabel = snapshot.activeAdapter?.portLabel
                 ?? L10n.string(.powerAdapter, language: language)
             let watts = snapshot.adapterInputPowerW > 0.05

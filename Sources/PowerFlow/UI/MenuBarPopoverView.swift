@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Everything PowerFlow shows, in one popover.
 struct MenuBarPopoverView: View {
-    static let width: CGFloat = 404
+    static let width: CGFloat = 440
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -32,9 +32,9 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 9) {
             header
 
-            PowerFlowBarView(
+            PowerFlowDiagram(
                 snapshot: snapshot,
-                settings: settings,
+                language: language,
                 isAnimating: monitor.isLiveStreaming
             )
 
@@ -123,6 +123,7 @@ struct MenuBarPopoverView: View {
         case .adapterCharging: return "bolt.fill"
         case .adapterBypass: return "powerplug.fill"
         case .adapterBatteryHybrid: return "bolt.badge.a.fill"
+        case .batteryWhilePluggedIn: return "battery.75percent"
         case .batteryOnly: return "battery.75percent"
         case .connectingAC: return "bolt.horizontal.fill"
         case .unknown: return "questionmark.circle"
@@ -135,7 +136,7 @@ struct MenuBarPopoverView: View {
             return PowerFlowTheme.chargeGreen(for: colorScheme)
         case .adapterBypass, .connectingAC:
             return PowerFlowTheme.acGold(for: colorScheme)
-        case .adapterBatteryHybrid:
+        case .adapterBatteryHybrid, .batteryWhilePluggedIn:
             return PowerFlowTheme.dischargeAmber(for: colorScheme)
         case .batteryOnly:
             return snapshot.isLowBatteryWarning || snapshot.atCriticalLevel
@@ -150,14 +151,23 @@ struct MenuBarPopoverView: View {
         guard snapshot.isDataAvailable else {
             return L10n.string(.flowUnknown, language: language)
         }
-        if snapshot.isFullyCharged && snapshot.isEffectivelyOnAC {
+        if snapshot.isFullyCharged && snapshot.isEffectivelyOnAC && snapshot.flowMode != .batteryWhilePluggedIn {
             return L10n.string(.fullyCharged, language: language)
         }
         if let minutes = snapshot.timeRemainingMinutes, minutes > 0 {
             let formatted = PowerFormatters.duration(minutes: minutes, language: language)
-            let suffix = snapshot.isTimeEstimateToFull
-                ? L10n.string(.timeToFull, language: language)
-                : L10n.string(.timeRemaining, language: language)
+            let suffix: String
+            if !snapshot.isTimeEstimateToFull {
+                suffix = L10n.string(.timeRemaining, language: language)
+            } else if snapshot.chargeLimitPercent < 100 {
+                suffix = L10n.tr(
+                    "to \(snapshot.chargeLimitPercent)%",
+                    zh: "充至 \(snapshot.chargeLimitPercent)%",
+                    language: language
+                )
+            } else {
+                suffix = L10n.string(.timeToFull, language: language)
+            }
             return "\(formatted) · \(suffix)"
         }
         if let holdReason = snapshot.chargingHoldReason, !holdReason.isEmpty {

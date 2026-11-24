@@ -7,7 +7,8 @@ A native macOS menu bar utility for real-time Apple Silicon power flow, battery 
 - **Zero-Root, Zero-Subprocess Telemetry**: Reads directly from `AppleSMC`, `AppleSmartBattery` (IOKit), and `IOPort` in-process with zero helper daemons or shell invocations.
 - **Low-Overhead Architecture**: Animations run in the render server. Runs purely event-driven (`IOPSNotification`, Low Power Mode, sleep/wake notifications) with **no background polling timer** when the popover is closed in icon-only or percentage menu bar modes.
 - **Native macOS Battery Icon**: Reproduces Apple's menu bar battery in the outlined or the solid macOS 27 design (selectable in Settings), using the system's own glyphs and rules for the charging bolt, plug, Low Power Mode yellow and low-battery red.
-- **Live Power Flow & Outbound USB-C Visibility**: Visualizes AC adapter input (MagSafe 3 / USB-C), standby adapters, battery charge/discharge/bypass state, total vs. net system load, and per-port outbound USB-C power, refreshed every second.
+- **Live Power Flow Diagram**: Charger, battery, Mac and USB-C devices as connected nodes with animated links whose thickness and speed follow the power — hybrid supply, charging, battery-only, bypass and draining to a charge limit while plugged in.
+- **Real-Time USB-C Output and System Charge Limit**: Per-port outbound power refreshed every second, and the charge limit macOS itself enforces.
 - **Bilingual UI**: Full English and Simplified Chinese (`简体中文`) localization with live runtime switching.
 
 ## Requirements

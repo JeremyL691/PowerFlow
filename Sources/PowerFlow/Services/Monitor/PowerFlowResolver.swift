@@ -8,6 +8,7 @@ final class PowerFlowResolver: @unchecked Sendable {
     let polarityCalibrator: SMCPolarityCalibrator
     private let timeEstimator: BatteryTimeEstimator
     private let chargeLimitProvider: ChargeLimitProvider
+    private let outboundGate = OutboundPortGate()
 
     init(
         polarityCalibrator: SMCPolarityCalibrator = SMCPolarityCalibrator(),
@@ -57,11 +58,14 @@ final class PowerFlowResolver: @unchecked Sendable {
         }()
 
         // 1. Outbound USB-C Power & Device Resolution
-        let outboundPorts = Self.resolveOutboundPorts(
-            powerOutDetails: reading.powerOutDetails,
-            fedDetails: reading.fedDetails,
-            portTopology: portTopology,
-            liveOutputs: smc.portOutputs
+        let outboundPorts = outboundGate.filter(
+            Self.resolveOutboundPorts(
+                powerOutDetails: reading.powerOutDetails,
+                fedDetails: reading.fedDetails,
+                portTopology: portTopology,
+                liveOutputs: smc.portOutputs
+            ),
+            at: timestamp
         )
         let totalOutboundPowerW = outboundPorts.reduce(0.0) { $0 + $1.powerW }
         let totalOutboundCurrentA = outboundPorts.reduce(0.0) { $0 + $1.currentA }
@@ -285,7 +289,8 @@ final class PowerFlowResolver: @unchecked Sendable {
             isExternalConnected: reading.isExternalConnected,
             isCharging: reading.isCharging,
             batteryPowerW: batteryPowerW,
-            batteryCurrentA: batteryCurrentA
+            batteryCurrentA: batteryCurrentA,
+            adapterInputPowerW: adapterInputPowerW
         )
 
         // 6. Battery Percent, Health, Charge Limit & Thermal
@@ -409,6 +414,7 @@ final class PowerFlowResolver: @unchecked Sendable {
             reading: reading,
             batteryPercent: batteryPercent,
             chargeLimitPercent: chargeLimit.limitPercent,
+            isDrainingToLimit: Self.isDraining(flowMode: flowMode, percent: batteryPercent, to: chargeLimit),
             maxCapacityMAh: health.rawMaxCapacityMAh ?? health.nominalCapacityMAh ?? health.designCapacityMAh,
             batteryCurrentA: batteryCurrentA,
             batteryPowerW: batteryPowerW,
@@ -495,12 +501,16 @@ final class PowerFlowResolver: @unchecked Sendable {
         return 0
     }
 
+    /// A connected charger that is not feeding the Mac still reads a few tenths of a watt.
+    static let idleAdapterPowerW = 1.0
+
     static func resolveFlowMode(
         connectionPhase: PowerConnectionPhase,
         isExternalConnected: Bool,
         isCharging: Bool,
         batteryPowerW: Double,
-        batteryCurrentA: Double
+        batteryCurrentA: Double,
+        adapterInputPowerW: Double
     ) -> PowerFlowMode {
         if connectionPhase == .connectingAC {
             return .connectingAC
@@ -515,7 +525,7 @@ final class PowerFlowResolver: @unchecked Sendable {
         }
         // Require consistent negative battery power AND negative current to classify as hybrid discharge.
         if batteryPowerW < -0.25 && batteryCurrentA < -0.02 {
-            return .adapterBatteryHybrid
+            return adapterInputPowerW < Self.idleAdapterPowerW ? .batteryWhilePluggedIn : .adapterBatteryHybrid
         }
         if isCharging && batteryPowerW >= 0 && batteryCurrentA >= 0 {
             return .adapterCharging
@@ -530,6 +540,7 @@ final class PowerFlowResolver: @unchecked Sendable {
         reading: SmartBatteryReading,
         batteryPercent: Int,
         chargeLimitPercent: Int,
+        isDrainingToLimit: Bool,
         maxCapacityMAh: Int?,
         batteryCurrentA: Double,
         batteryPowerW: Double,
@@ -554,7 +565,11 @@ final class PowerFlowResolver: @unchecked Sendable {
             }
             return (osMinutes ?? estimatorMinutes, true)
 
-        case .batteryOnly, .adapterBatteryHybrid:
+        case .batteryWhilePluggedIn where isDrainingToLimit:
+            // Discharge stops at the limit, so a time to empty would be misleading.
+            return (nil, false)
+
+        case .batteryOnly, .adapterBatteryHybrid, .batteryWhilePluggedIn:
             let osMinutes = BatteryTimeEstimator.sanitizedOSMinutes(
                 reading.timeRemainingMinutes ?? reading.avgTimeToEmptyMinutes
             )
@@ -592,6 +607,14 @@ final class PowerFlowResolver: @unchecked Sendable {
         }
     }
 
+    static func isDraining(
+        flowMode: PowerFlowMode,
+        percent: Int,
+        to limit: BatteryChargeLimitInfo
+    ) -> Bool {
+        flowMode == .batteryWhilePluggedIn && limit.drainsToLimit && percent > limit.limitPercent
+    }
+
     static func resolveChargingHoldReason(
         effectiveOnAC: Bool,
         flowMode: PowerFlowMode,
@@ -614,7 +637,11 @@ final class PowerFlowResolver: @unchecked Sendable {
             return nil
         }
 
-        if isFullyCharged && batteryPercent >= 100 {
+        if isDraining(flowMode: flowMode, percent: batteryPercent, to: chargeLimit) {
+            return "Draining to \(chargeLimit.limitPercent)%"
+        }
+
+        if flowMode != .batteryWhilePluggedIn && isFullyCharged && batteryPercent >= 100 {
             return "Fully Charged"
         }
 

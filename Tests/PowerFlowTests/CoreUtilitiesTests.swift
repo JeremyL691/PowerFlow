@@ -175,8 +175,18 @@ final class CoreUtilitiesTests: XCTestCase {
             BatteryChargeLimitInfo(limitPercent: 70, source: .alDente)
         )
         XCTAssertEqual(
-            BatteryChargeLimitResolver.resolve(notChargingReason: 0, macOSLimit: 80),
-            BatteryChargeLimitInfo(limitPercent: 80, source: .macOSSetting)
+            BatteryChargeLimitResolver.resolve(
+                notChargingReason: 0,
+                systemPolicy: SystemChargePolicy(limitPercent: 80, drainsToLimit: true, isManual: true)
+            ),
+            BatteryChargeLimitInfo(limitPercent: 80, source: .macOSSetting, drainsToLimit: true)
+        )
+        XCTAssertEqual(
+            BatteryChargeLimitResolver.resolve(
+                notChargingReason: 0,
+                systemPolicy: SystemChargePolicy(limitPercent: 85, drainsToLimit: false, isManual: false)
+            ),
+            BatteryChargeLimitInfo(limitPercent: 85, source: .optimizedCharging)
         )
         // A limit of 100% is no limit.
         XCTAssertEqual(

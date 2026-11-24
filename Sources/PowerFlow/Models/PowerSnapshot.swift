@@ -4,6 +4,8 @@ enum PowerFlowMode: String, Sendable, Equatable, Hashable, Codable {
     case adapterBypass
     case adapterCharging
     case adapterBatteryHybrid
+    /// A charger is connected but supplies nothing; the battery runs the Mac.
+    case batteryWhilePluggedIn
     case batteryOnly
     case connectingAC
     case unknown
@@ -603,6 +605,10 @@ struct PowerSnapshot: Sendable, Equatable, Hashable, Codable {
         isExternalConnected || connectionPhase != .onBattery
     }
 
+    var isAdapterSupplyingPower: Bool {
+        isEffectivelyOnAC && flowMode != .batteryWhilePluggedIn
+    }
+
     var isBatteryCharging: Bool {
         batteryPowerW > 0.1 || batteryCurrentA > 0.02
     }
@@ -612,9 +618,7 @@ struct PowerSnapshot: Sendable, Equatable, Hashable, Codable {
     }
 
     var hasActiveOutboundPower: Bool {
-        totalOutboundPowerW > 0.05
-            || totalOutboundCurrentA > 0.01
-            || outboundPorts.contains { $0.powerW > 0.05 || $0.currentA > 0.01 }
+        !outboundPorts.isEmpty
     }
 
     var batteryChargeRateW: Double {
