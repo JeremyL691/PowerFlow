@@ -2,63 +2,115 @@ import SwiftUI
 
 struct OutboundSection: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     let snapshot: PowerSnapshot
     let language: AppLanguage
 
-    private var cyan: Color { PowerFlowTheme.outboundCyan(for: colorScheme) }
-
+    private var cyan: Color { PowerFlowTheme.outboundCyan(for: colorScheme, contrast: colorSchemeContrast) }
     private var ports: [OutboundPortPower] { snapshot.outboundPorts }
+    private var isQuiet: Bool { ports.isEmpty }
 
     var body: some View {
         PopoverSection(
             icon: "arrow.up.right.circle.fill",
-            tint: ports.isEmpty ? PowerFlowTheme.mutedLabel(for: colorScheme) : cyan,
-            title: L10n.string(.outboundUSBCPower, language: language)
+            tint: isQuiet ? PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast) : cyan,
+            title: L10n.string(.outboundUSBCPower, language: language),
+            isQuiet: isQuiet
         ) {
-            if !ports.isEmpty {
+            if isQuiet {
+                Text(L10n.string(.noOutboundDevices, language: language))
+                    .font(PowerFlowTheme.Typography.captionFloor)
+                    .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } else {
                 Text("\(PowerFormatters.amps(snapshot.totalOutboundCurrentA)) · \(PowerFormatters.watts(snapshot.totalOutboundPowerW))")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(PowerFlowTheme.Typography.rowValue)
                     .monospacedDigit()
+                    .powerFlowNumericTransition()
                     .foregroundStyle(cyan)
+                    .fixedSize(horizontal: true, vertical: false)
             }
         } content: {
-            if ports.isEmpty {
-                Text(L10n.string(.noOutboundDevices, language: language))
-                    .font(.system(size: 11))
-                    .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme))
+            if isQuiet {
+                EmptyView()
             } else {
-                VStack(spacing: 6) {
+                VStack(spacing: 4) {
                     ForEach(ports) { port in
-                        portRow(port)
+                        OutboundPortRow(port: port, language: language)
                     }
                 }
             }
         }
     }
+}
 
-    private func portRow(_ port: OutboundPortPower) -> some View {
-        VStack(spacing: 4) {
-            HStack(spacing: 6) {
+private struct OutboundPortRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let port: OutboundPortPower
+    let language: AppLanguage
+
+    @State private var isHovered = false
+
+    private var cyan: Color { PowerFlowTheme.outboundCyan(for: colorScheme, contrast: colorSchemeContrast) }
+
+    var body: some View {
+        VStack(spacing: 5) {
+            HStack(spacing: 7) {
                 PowerFlowChip(text: port.portLabel, tint: cyan)
+
                 Text(L10n.deviceName(for: port, language: language))
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme))
+                    .font(PowerFlowTheme.Typography.rowLabel)
+                    .fontWeight(.medium)
+                    .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme, contrast: colorSchemeContrast))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Spacer(minLength: 4)
+
+                Spacer(minLength: 6)
+
                 Text("\(PowerFormatters.amps(port.currentA)) · \(PowerFormatters.volts(port.voltageV))")
-                    .font(.system(size: 10.5))
+                    .font(PowerFlowTheme.Typography.captionFloor)
                     .monospacedDigit()
-                    .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme))
+                    .powerFlowNumericTransition()
+                    .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
+                    .fixedSize(horizontal: true, vertical: false)
+
                 Text(PowerFormatters.watts(port.powerW))
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(PowerFlowTheme.Typography.rowValue)
+                    .fontWeight(.semibold)
                     .monospacedDigit()
+                    .powerFlowNumericTransition()
                     .foregroundStyle(cyan)
-                    .frame(minWidth: 48, alignment: .trailing)
+                    .frame(minWidth: 52, alignment: .trailing)
+                    .fixedSize(horizontal: true, vertical: false)
             }
+
             if port.maxPDWatts > 0.5 {
-                ProgressLine(fraction: port.powerW / port.maxPDWatts, tint: cyan)
+                ProgressLine(
+                    fraction: port.powerW / port.maxPDWatts,
+                    tint: cyan,
+                    height: 3.5
+                )
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(isHovered ? cyan.opacity(colorScheme == .dark ? 0.085 : 0.06) : .clear)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onHover { hovering in
+            if reduceMotion {
+                isHovered = hovering
+            } else {
+                withAnimation(.easeOut(duration: 0.14)) {
+                    isHovered = hovering
+                }
             }
         }
     }

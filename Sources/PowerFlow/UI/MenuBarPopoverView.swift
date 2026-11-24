@@ -2,9 +2,12 @@ import SwiftUI
 
 /// Everything PowerFlow shows, in one popover.
 struct MenuBarPopoverView: View {
-    static let width: CGFloat = 440
+    static let width: CGFloat = 452
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
     let monitor: PowerMonitor
     /// Content taller than this scrolls instead of leaving the screen.
@@ -12,109 +15,183 @@ struct MenuBarPopoverView: View {
     let openSettings: () -> Void
     let quitApp: () -> Void
 
+    @State private var hasAppeared = false
+    @State private var isLiveDotDimmed = false
+
     private var snapshot: PowerSnapshot { monitor.snapshot }
     private var settings: PowerSettings { monitor.settingsStore.settings }
     private var language: AppLanguage { settings.appLanguage }
 
     var body: some View {
-        ViewThatFits(in: .vertical) {
-            sections
-            ScrollView(.vertical) {
+        ZStack(alignment: .top) {
+            ambientCanvasWash
+
+            ViewThatFits(in: .vertical) {
                 sections
+                ScrollView(.vertical) {
+                    sections
+                }
+                .scrollIndicators(.never)
             }
-            .scrollIndicators(.never)
         }
         .frame(width: Self.width)
         .frame(maxHeight: maxHeight)
+        .onAppear {
+            if reduceMotion {
+                hasAppeared = true
+            } else if !hasAppeared {
+                hasAppeared = true
+            }
+            syncLivePulse()
+        }
+        .onChange(of: monitor.isLiveStreaming) { _, _ in
+            syncLivePulse()
+        }
+        .onChange(of: reduceMotion) { _, reduced in
+            if reduced {
+                hasAppeared = true
+            }
+            syncLivePulse()
+        }
+    }
+
+    private var ambientCanvasWash: some View {
+        LinearGradient(
+            colors: [
+                statusTint.opacity(colorScheme == .dark ? 0.065 : 0.045),
+                .clear
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .frame(height: 148)
+        .allowsHitTesting(false)
     }
 
     private var sections: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            header
+        VStack(alignment: .leading, spacing: 10) {
+            heroHeader
+                .modifier(StaggeredRevealModifier(index: 0, hasAppeared: hasAppeared, reduceMotion: reduceMotion))
 
             PowerFlowDiagram(
                 snapshot: snapshot,
                 language: language,
                 isAnimating: monitor.isLiveStreaming
             )
+            .modifier(StaggeredRevealModifier(index: 1, hasAppeared: hasAppeared, reduceMotion: reduceMotion))
 
-            metricStrip
+            telemetryRibbon
+                .modifier(StaggeredRevealModifier(index: 2, hasAppeared: hasAppeared, reduceMotion: reduceMotion))
+
             BatterySections(snapshot: snapshot, settings: settings)
+                .modifier(StaggeredRevealModifier(index: 3, hasAppeared: hasAppeared, reduceMotion: reduceMotion))
+
             AdapterSection(snapshot: snapshot, settings: settings)
+                .modifier(StaggeredRevealModifier(index: 4, hasAppeared: hasAppeared, reduceMotion: reduceMotion))
+
             OutboundSection(snapshot: snapshot, language: language)
+                .modifier(StaggeredRevealModifier(index: 5, hasAppeared: hasAppeared, reduceMotion: reduceMotion))
+
             footer
+                .modifier(StaggeredRevealModifier(index: 6, hasAppeared: hasAppeared, reduceMotion: reduceMotion))
         }
-        .padding(13)
+        .padding(14)
     }
 
-    // MARK: - Header
+    // MARK: - Hero Instrument Header
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
-                    Text(L10n.string(.appName, language: language))
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme))
+    private var heroHeader: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .bottom, spacing: 10) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Text(L10n.string(.appName, language: language))
+                            .font(.system(size: 14.5, weight: .semibold))
+                            .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme, contrast: colorSchemeContrast))
 
-                    if snapshot.isLowPowerModeEnabled {
-                        PowerFlowChip(
-                            icon: "leaf.fill",
-                            text: L10n.tr("Low Power", zh: "低电量", language: language),
-                            tint: PowerFlowTheme.dischargeAmber(for: colorScheme)
-                        )
-                    }
-                }
-
-                HStack(spacing: 5) {
-                    PowerFlowChip(
-                        icon: statusSymbol,
-                        text: L10n.label(for: snapshot.flowMode, language: language),
-                        tint: statusTint
-                    )
-
-                    if snapshot.chargeLimitPercent < 100 {
-                        PowerFlowChip(
-                            text: "\(L10n.string(.chargeLimit, language: language)) \(snapshot.chargeLimitPercent)%",
-                            tint: PowerFlowTheme.acGold(for: colorScheme)
-                        )
-                    }
-                }
-            }
-
-            Spacer(minLength: 6)
-
-            VStack(alignment: .trailing, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 5) {
-                    if let rawSoC = snapshot.rawStateOfCharge,
-                       snapshot.isDataAvailable,
-                       rawSoC != snapshot.batteryPercent
-                    {
-                        Text("HW \(PowerFormatters.percent(rawSoC))")
-                            .font(.system(size: 10, weight: .medium))
-                            .monospacedDigit()
-                            .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1.5)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(PowerFlowTheme.nestedTileFill(for: colorScheme))
+                        if snapshot.isLowPowerModeEnabled {
+                            PowerFlowChip(
+                                icon: "leaf.fill",
+                                text: L10n.tr("Low Power", zh: "低电量", language: language),
+                                tint: PowerFlowTheme.dischargeAmber(for: colorScheme, contrast: colorSchemeContrast)
                             )
-                            .help(L10n.string(.hardwareSoC, language: language))
+                        }
                     }
 
-                    Text(snapshot.isDataAvailable ? PowerFormatters.percent(snapshot.batteryPercent) : "—%")
-                        .font(.system(size: 24, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme))
+                    HStack(spacing: 5) {
+                        PowerFlowChip(
+                            icon: statusSymbol,
+                            text: L10n.label(for: snapshot.flowMode, language: language),
+                            tint: statusTint,
+                            isProminent: true
+                        )
+
+                        if snapshot.chargeLimitPercent < 100 {
+                            PowerFlowChip(
+                                icon: differentiateWithoutColor ? "dial.low.fill" : nil,
+                                text: "\(L10n.string(.chargeLimit, language: language)) \(snapshot.chargeLimitPercent)%",
+                                tint: PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast)
+                            )
+                        }
+                    }
                 }
 
-                Text(timeEstimateCaption)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme))
-                    .lineLimit(1)
+                Spacer(minLength: 6)
+
+                VStack(alignment: .trailing, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        if let rawSoC = snapshot.rawStateOfCharge,
+                           snapshot.isDataAvailable,
+                           rawSoC != snapshot.batteryPercent
+                        {
+                            Text("HW \(PowerFormatters.percent(rawSoC))")
+                                .font(PowerFlowTheme.Typography.monoCaptionFloor)
+                                .monospacedDigit()
+                                .powerFlowNumericTransition()
+                                .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Capsule(style: .continuous)
+                                        .fill(PowerFlowTheme.nestedTileFill(for: colorScheme, contrast: colorSchemeContrast))
+                                )
+                                .overlay(
+                                    Capsule(style: .continuous)
+                                        .strokeBorder(
+                                            PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast),
+                                            lineWidth: 0.5
+                                        )
+                                )
+                                .fixedSize(horizontal: true, vertical: false)
+                                .help(L10n.string(.hardwareSoC, language: language))
+                        }
+
+                        Text(snapshot.isDataAvailable ? PowerFormatters.percent(snapshot.batteryPercent) : "—%")
+                            .font(PowerFlowTheme.Typography.heroSoC)
+                            .monospacedDigit()
+                            .powerFlowNumericTransition()
+                            .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme, contrast: colorSchemeContrast))
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+
+                    Text(heroSubtitle)
+                        .font(PowerFlowTheme.Typography.heroSubvalue)
+                        .monospacedDigit()
+                        .powerFlowNumericTransition()
+                        .foregroundStyle(PowerFlowTheme.secondaryValue(for: colorScheme, contrast: colorSchemeContrast))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
+
+            ProgressLine(
+                fraction: snapshot.isDataAvailable ? Double(snapshot.batteryPercent) / 100.0 : 0,
+                tint: heroProgressTint,
+                limitFraction: snapshot.chargeLimitPercent < 100 ? Double(snapshot.chargeLimitPercent) / 100.0 : nil,
+                height: 6
+            )
+            .accessibilityLabel(L10n.string(.batteryCharge, language: language))
+            .accessibilityValue(snapshot.isDataAvailable ? PowerFormatters.percent(snapshot.batteryPercent) : "—%")
         }
     }
 
@@ -124,7 +201,7 @@ struct MenuBarPopoverView: View {
         case .adapterBypass: return "powerplug.fill"
         case .adapterBatteryHybrid: return "bolt.badge.a.fill"
         case .batteryWhilePluggedIn: return "battery.75percent"
-        case .batteryOnly: return "battery.75percent"
+        case .batteryOnly: return PowerFlowTheme.batterySymbol(percent: snapshot.batteryPercent, isCharging: false)
         case .connectingAC: return "bolt.horizontal.fill"
         case .unknown: return "questionmark.circle"
         }
@@ -133,27 +210,58 @@ struct MenuBarPopoverView: View {
     private var statusTint: Color {
         switch snapshot.flowMode {
         case .adapterCharging:
-            return PowerFlowTheme.chargeGreen(for: colorScheme)
+            return PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
         case .adapterBypass, .connectingAC:
-            return PowerFlowTheme.acGold(for: colorScheme)
+            return PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast)
         case .adapterBatteryHybrid, .batteryWhilePluggedIn:
-            return PowerFlowTheme.dischargeAmber(for: colorScheme)
+            return PowerFlowTheme.dischargeAmber(for: colorScheme, contrast: colorSchemeContrast)
         case .batteryOnly:
             return snapshot.isLowBatteryWarning || snapshot.atCriticalLevel
-                ? PowerFlowTheme.warningRed(for: colorScheme)
-                : PowerFlowTheme.secondaryValue(for: colorScheme)
+                ? PowerFlowTheme.warningRed(for: colorScheme, contrast: colorSchemeContrast)
+                : PowerFlowTheme.secondaryValue(for: colorScheme, contrast: colorSchemeContrast)
         case .unknown:
-            return PowerFlowTheme.mutedLabel(for: colorScheme)
+            return PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
         }
     }
 
-    private var timeEstimateCaption: String {
+    private var heroProgressTint: Color {
+        guard snapshot.isDataAvailable else {
+            return PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
+        }
+        if snapshot.isLowBatteryWarning || snapshot.atCriticalLevel {
+            return PowerFlowTheme.warningRed(for: colorScheme, contrast: colorSchemeContrast)
+        }
+        if snapshot.isLowPowerModeEnabled {
+            return PowerFlowTheme.dischargeAmber(for: colorScheme, contrast: colorSchemeContrast)
+        }
+        switch snapshot.flowMode {
+        case .adapterCharging:
+            return PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
+        case .adapterBypass, .connectingAC:
+            return PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast)
+        case .adapterBatteryHybrid, .batteryWhilePluggedIn:
+            return PowerFlowTheme.dischargeAmber(for: colorScheme, contrast: colorSchemeContrast)
+        case .batteryOnly:
+            return snapshot.batteryPercent <= 20
+                ? PowerFlowTheme.dischargeAmber(for: colorScheme, contrast: colorSchemeContrast)
+                : PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
+        case .unknown:
+            return PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
+        }
+    }
+
+    private var heroSubtitle: String {
         guard snapshot.isDataAvailable else {
             return L10n.string(.flowUnknown, language: language)
         }
         if snapshot.isFullyCharged && snapshot.isEffectivelyOnAC && snapshot.flowMode != .batteryWhilePluggedIn {
             return L10n.string(.fullyCharged, language: language)
         }
+
+        let netWatts: String? = abs(snapshot.batteryPowerW) >= 0.05
+            ? PowerFormatters.watts(snapshot.batteryPowerW, decimals: 1, signed: true)
+            : nil
+
         if let minutes = snapshot.timeRemainingMinutes, minutes > 0 {
             let formatted = PowerFormatters.duration(minutes: minutes, language: language)
             let suffix: String
@@ -168,33 +276,52 @@ struct MenuBarPopoverView: View {
             } else {
                 suffix = L10n.string(.timeToFull, language: language)
             }
-            return "\(formatted) · \(suffix)"
+
+            let timeText = "\(formatted) · \(suffix)"
+            if let netWatts, !(snapshot.flowMode == .batteryWhilePluggedIn && snapshot.chargeLimitPercent < 100) {
+                return "\(netWatts) · \(timeText)"
+            }
+            return timeText
         }
+
         if let holdReason = snapshot.chargingHoldReason, !holdReason.isEmpty {
-            return L10n.chargingHold(
+            let holdText = L10n.chargingHold(
                 holdReason,
                 chargeLimitPercent: snapshot.chargeLimitPercent,
                 language: language
             )
+            if let netWatts {
+                return "\(netWatts) · \(holdText)"
+            }
+            return holdText
         }
+
         if snapshot.flowMode == .adapterBypass {
             return L10n.string(.bypass, language: language)
         }
+
+        if let netWatts {
+            return netWatts
+        }
+
         return L10n.label(for: snapshot.telemetrySource, language: language)
     }
 
-    // MARK: - Metric Strip
+    // MARK: - Unified Telemetry Ribbon
 
-    private var metricStrip: some View {
-        HStack(spacing: 7) {
-            metricTile(
+    private var telemetryRibbon: some View {
+        HStack(spacing: 0) {
+            ribbonSegment(
                 icon: "gauge.with.dots.needle.67percent",
-                tint: PowerFlowTheme.acGold(for: colorScheme),
+                tint: PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast),
                 title: L10n.string(.systemLoad, language: language),
                 value: snapshot.isDataAvailable ? PowerFormatters.watts(snapshot.totalSystemLoadW, decimals: 1) : "—",
                 detail: loadDetail
             )
-            metricTile(
+
+            ribbonDivider
+
+            ribbonSegment(
                 icon: "cpu",
                 tint: thermalTint,
                 title: L10n.string(.cpuTemp, language: language),
@@ -206,14 +333,20 @@ struct MenuBarPopoverView: View {
                     "GPU \(PowerFormatters.temperature($0, unit: settings.temperatureUnit))"
                 } ?? thermalLabel
             )
-            metricTile(
+
+            ribbonDivider
+
+            ribbonSegment(
                 icon: "fan",
-                tint: PowerFlowTheme.outboundCyan(for: colorScheme),
+                tint: PowerFlowTheme.outboundCyan(for: colorScheme, contrast: colorSchemeContrast),
                 title: L10n.string(.fans, language: language),
                 value: fanValue,
                 detail: thermalLabel
             )
-            metricTile(
+
+            ribbonDivider
+
+            ribbonSegment(
                 icon: "heart.fill",
                 tint: healthTint,
                 title: L10n.tr("Health", zh: "电池健康", language: language),
@@ -225,9 +358,18 @@ struct MenuBarPopoverView: View {
                 } ?? "—"
             )
         }
+        .fixedSize(horizontal: false, vertical: true)
+        .powerFlowSurface(.quietStrip, cornerRadius: 13)
     }
 
-    private func metricTile(
+    private var ribbonDivider: some View {
+        Rectangle()
+            .fill(PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast))
+            .frame(width: 0.5)
+            .padding(.vertical, 9)
+    }
+
+    private func ribbonSegment(
         icon: String,
         tint: Color,
         title: String,
@@ -237,38 +379,33 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
                 Image(systemName: icon)
-                    .font(.system(size: 9.5, weight: .semibold))
+                    .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(tint)
                 Text(title)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme))
+                    .font(PowerFlowTheme.Typography.captionFloor)
+                    .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .truncationMode(.tail)
             }
+
             Text(value)
-                .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                .font(PowerFlowTheme.Typography.metricValue)
                 .monospacedDigit()
-                .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme))
+                .powerFlowNumericTransition()
+                .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme, contrast: colorSchemeContrast))
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .minimumScaleFactor(0.9)
+
             Text(detail)
-                .font(.system(size: 9.5))
+                .font(PowerFlowTheme.Typography.captionFloor)
                 .monospacedDigit()
-                .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme))
+                .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
                 .lineLimit(1)
-                .minimumScaleFactor(0.85)
+                .truncationMode(.tail)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(PowerFlowTheme.nestedTileFill(for: colorScheme))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(PowerFlowTheme.hairlineDivider(for: colorScheme), lineWidth: 0.65)
-        )
     }
 
     private var loadDetail: String {
@@ -298,77 +435,95 @@ struct MenuBarPopoverView: View {
 
     private var thermalTint: Color {
         switch thermalState {
-        case .nominal: return PowerFlowTheme.chargeGreen(for: colorScheme)
-        case .fair: return PowerFlowTheme.acGold(for: colorScheme)
-        case .serious: return PowerFlowTheme.dischargeAmber(for: colorScheme)
-        case .critical: return PowerFlowTheme.warningRed(for: colorScheme)
+        case .nominal: return PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
+        case .fair: return PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast)
+        case .serious: return PowerFlowTheme.dischargeAmber(for: colorScheme, contrast: colorSchemeContrast)
+        case .critical: return PowerFlowTheme.warningRed(for: colorScheme, contrast: colorSchemeContrast)
         }
     }
 
     private var healthTint: Color {
         switch snapshot.health.condition {
         case .serviceRecommended:
-            return PowerFlowTheme.warningRed(for: colorScheme)
+            return PowerFlowTheme.warningRed(for: colorScheme, contrast: colorSchemeContrast)
         case .normal:
             return (snapshot.health.realHealthPercent ?? 100) < 80
-                ? PowerFlowTheme.dischargeAmber(for: colorScheme)
-                : PowerFlowTheme.chargeGreen(for: colorScheme)
+                ? PowerFlowTheme.dischargeAmber(for: colorScheme, contrast: colorSchemeContrast)
+                : PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
         case .unknown:
-            return PowerFlowTheme.mutedLabel(for: colorScheme)
+            return PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
         }
     }
 
-    // MARK: - Footer
+    // MARK: - Footer Toolbar
 
     private var footer: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(
-                    monitor.isLiveStreaming
-                        ? PowerFlowTheme.chargeGreen(for: colorScheme)
-                        : PowerFlowTheme.mutedLabel(for: colorScheme)
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(
+                        monitor.isLiveStreaming
+                            ? PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
+                            : PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
+                    )
+                    .frame(width: 6, height: 6)
+                    .opacity(monitor.isLiveStreaming && !reduceMotion && isLiveDotDimmed ? 0.38 : 1.0)
+
+                Text(
+                    "\(L10n.string(monitor.isLiveStreaming ? .live : .paused, language: language)) · \(L10n.label(for: snapshot.telemetrySource, language: language)) · \(String(format: "%.0fs", settings.liveRefreshInterval.rawValue))"
                 )
-                .frame(width: 6, height: 6)
-            Text(
-                "\(L10n.string(monitor.isLiveStreaming ? .live : .paused, language: language)) · \(L10n.label(for: snapshot.telemetrySource, language: language)) · \(String(format: "%.0fs", settings.liveRefreshInterval.rawValue))"
-            )
-            .font(.system(size: 10))
-            .monospacedDigit()
-            .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme))
-            .lineLimit(1)
+                .font(PowerFlowTheme.Typography.captionFloor)
+                .monospacedDigit()
+                .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            }
 
             Spacer(minLength: 6)
 
-            iconButton(
-                symbol: "gearshape.fill",
-                helpText: L10n.string(.settings, language: language),
-                action: openSettings
-            )
-            iconButton(
-                symbol: "power",
-                helpText: L10n.string(.quitPowerFlow, language: language),
-                action: quitApp
-            )
+            HStack(spacing: 6) {
+                PopoverIconButton(
+                    symbol: "gearshape.fill",
+                    helpText: L10n.string(.settings, language: language),
+                    action: openSettings
+                )
+                PopoverIconButton(
+                    symbol: "power",
+                    helpText: L10n.string(.quitPowerFlow, language: language),
+                    isDestructiveHover: true,
+                    action: quitApp
+                )
+            }
+            .powerFlowGlassGroup(spacing: 6)
         }
+        .padding(.top, 1)
     }
 
-    private func iconButton(symbol: String, helpText: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(PowerFlowTheme.secondaryValue(for: colorScheme))
-                .frame(width: 28, height: 25)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(PowerFlowTheme.nestedTileFill(for: colorScheme))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(PowerFlowTheme.hairlineDivider(for: colorScheme), lineWidth: 0.65)
-                )
+    private func syncLivePulse() {
+        if monitor.isLiveStreaming && !reduceMotion {
+            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+                isLiveDotDimmed = true
+            }
+        } else {
+            withAnimation(nil) {
+                isLiveDotDimmed = false
+            }
         }
-        .buttonStyle(.plain)
-        .help(helpText)
-        .accessibilityLabel(helpText)
+    }
+}
+
+private struct StaggeredRevealModifier: ViewModifier {
+    let index: Int
+    let hasAppeared: Bool
+    let reduceMotion: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(reduceMotion || hasAppeared ? 1 : 0)
+            .offset(y: reduceMotion || hasAppeared ? 0 : 4)
+            .animation(
+                reduceMotion ? nil : .spring(duration: 0.30, bounce: 0.12).delay(Double(index) * 0.022),
+                value: hasAppeared
+            )
     }
 }

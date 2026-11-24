@@ -3,6 +3,8 @@ import SwiftUI
 /// Battery specs and battery health, side by side.
 struct BatterySections: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
     let snapshot: PowerSnapshot
     let settings: PowerSettings
@@ -11,7 +13,7 @@ struct BatterySections: View {
     private var health: BatteryHealthInfo { snapshot.health }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: 9) {
             specs
             healthCard
         }
@@ -23,16 +25,17 @@ struct BatterySections: View {
     private var specs: some View {
         PopoverSection(
             icon: "bolt.fill",
-            tint: PowerFlowTheme.acGold(for: colorScheme),
+            tint: PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast),
             title: L10n.string(.batterySpecs, language: language)
         ) {
             EmptyView()
         } content: {
-            VStack(spacing: 5) {
+            VStack(spacing: 6) {
                 KeyValueRow(
                     label: L10n.string(.power, language: language),
                     value: live(PowerFormatters.watts(snapshot.batteryPowerW, signed: true)),
-                    valueColor: flowColor
+                    valueColor: flowColor,
+                    prefixSymbol: flowPrefixSymbol
                 )
                 KeyValueRow(
                     label: L10n.string(.current, language: language),
@@ -65,10 +68,21 @@ struct BatterySections: View {
 
     private var flowColor: Color? {
         if snapshot.isBatteryCharging {
-            return PowerFlowTheme.chargeGreen(for: colorScheme)
+            return PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
         }
         if snapshot.isBatteryDischarging {
-            return PowerFlowTheme.dischargeAmber(for: colorScheme)
+            return PowerFlowTheme.dischargeAmber(for: colorScheme, contrast: colorSchemeContrast)
+        }
+        return nil
+    }
+
+    private var flowPrefixSymbol: String? {
+        guard differentiateWithoutColor else { return nil }
+        if snapshot.isBatteryCharging {
+            return "arrow.down.circle.fill"
+        }
+        if snapshot.isBatteryDischarging {
+            return "arrow.up.circle.fill"
         }
         return nil
     }
@@ -81,12 +95,21 @@ struct BatterySections: View {
             tint: conditionTint,
             title: L10n.string(.batteryHealth, language: language)
         ) {
-            Text(L10n.label(for: health.condition, language: language))
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(conditionTint)
-                .lineLimit(1)
+            HStack(spacing: 3.5) {
+                if differentiateWithoutColor || health.condition == .serviceRecommended {
+                    Image(systemName: conditionSymbol)
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
+                Text(L10n.label(for: health.condition, language: language))
+                    .font(PowerFlowTheme.Typography.captionFloor)
+                    .fontWeight(.semibold)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .foregroundStyle(conditionTint)
+            .fixedSize(horizontal: true, vertical: false)
         } content: {
-            VStack(spacing: 5) {
+            VStack(spacing: 6) {
                 KeyValueRow(
                     label: L10n.string(.maximumCapacity, language: language),
                     value: PowerFormatters.capacityMAh(health.rawMaxCapacityMAh)
@@ -122,11 +145,22 @@ struct BatterySections: View {
     private var conditionTint: Color {
         switch health.condition {
         case .normal:
-            return PowerFlowTheme.chargeGreen(for: colorScheme)
+            return PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
         case .serviceRecommended:
-            return PowerFlowTheme.warningRed(for: colorScheme)
+            return PowerFlowTheme.warningRed(for: colorScheme, contrast: colorSchemeContrast)
         case .unknown:
-            return PowerFlowTheme.mutedLabel(for: colorScheme)
+            return PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
+        }
+    }
+
+    private var conditionSymbol: String {
+        switch health.condition {
+        case .normal:
+            return "checkmark.circle.fill"
+        case .serviceRecommended:
+            return "exclamationmark.triangle.fill"
+        case .unknown:
+            return "questionmark.circle"
         }
     }
 }

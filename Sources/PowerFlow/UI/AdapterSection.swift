@@ -2,19 +2,24 @@ import SwiftUI
 
 struct AdapterSection: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     let snapshot: PowerSnapshot
     let settings: PowerSettings
 
     private var language: AppLanguage { settings.appLanguage }
     private var adapter: AdapterSourceInfo? { snapshot.activeAdapter }
-    private var gold: Color { PowerFlowTheme.acGold(for: colorScheme) }
+    private var gold: Color { PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast) }
+    private var isQuiet: Bool { !snapshot.isEffectivelyOnAC && snapshot.standbyAdapters.isEmpty }
 
     var body: some View {
         PopoverSection(
             icon: "powerplug.fill",
-            tint: snapshot.isEffectivelyOnAC ? gold : PowerFlowTheme.mutedLabel(for: colorScheme),
-            title: L10n.string(.powerAdapterSpecs, language: language)
+            tint: snapshot.isEffectivelyOnAC
+                ? gold
+                : PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast),
+            title: L10n.string(.powerAdapterSpecs, language: language),
+            isQuiet: isQuiet
         ) {
             if snapshot.isEffectivelyOnAC {
                 PowerFlowChip(
@@ -22,35 +27,50 @@ struct AdapterSection: View {
                     text: adapter?.portLabel ?? L10n.string(.portUnknown, language: language),
                     tint: gold
                 )
+            } else {
+                Text(L10n.string(.noAdapterConnected, language: language))
+                    .font(PowerFlowTheme.Typography.captionFloor)
+                    .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
         } content: {
             if snapshot.isEffectivelyOnAC {
                 connectedContent
+            } else if !snapshot.standbyAdapters.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(snapshot.standbyAdapters) { standby in
+                        standbyRow(standby)
+                    }
+                }
             } else {
-                Text(L10n.string(.noAdapterConnected, language: language))
-                    .font(.system(size: 11))
-                    .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme))
+                EmptyView()
             }
         }
     }
 
     @ViewBuilder
     private var connectedContent: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 7) {
             if !headline.isEmpty {
                 Text(headline)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(PowerFlowTheme.secondaryValue(for: colorScheme))
+                    .font(PowerFlowTheme.Typography.rowLabel)
+                    .fontWeight(.medium)
+                    .foregroundStyle(PowerFlowTheme.secondaryValue(for: colorScheme, contrast: colorSchemeContrast))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
 
             if ratedWatts > 0.5 {
-                ProgressLine(fraction: snapshot.adapterInputPowerW / ratedWatts, tint: gold)
-                    .padding(.vertical, 1)
+                ProgressLine(
+                    fraction: snapshot.adapterInputPowerW / ratedWatts,
+                    tint: gold,
+                    height: 5
+                )
+                .padding(.vertical, 1)
             }
 
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 5) {
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
                 GridRow {
                     KeyValueRow(
                         label: L10n.string(.power, language: language),
@@ -114,22 +134,38 @@ struct AdapterSection: View {
     }
 
     private func profileChips(_ profiles: [USBPDProfile]) -> some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 70), spacing: 5)], alignment: .leading, spacing: 5) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 78), spacing: 6)], alignment: .leading, spacing: 6) {
             ForEach(profiles) { profile in
                 let isActive = profile.isActive || profile.index == adapter?.activePDProfileIndex
                 Text("\(compact(profile.maxVoltageV, "V"))/\(compact(profile.maxCurrentA, "A"))")
-                    .font(.system(size: 9.5, weight: isActive ? .semibold : .medium))
+                    .font(PowerFlowTheme.Typography.monoCaptionFloor)
+                    .fontWeight(isActive ? .semibold : .medium)
                     .monospacedDigit()
-                    .foregroundStyle(isActive ? gold : PowerFlowTheme.mutedLabel(for: colorScheme))
+                    .foregroundStyle(
+                        isActive
+                            ? gold
+                            : PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
+                    )
                     .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 2.5)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3.5)
                     .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
                             .fill(
                                 isActive
-                                    ? gold.opacity(colorScheme == .dark ? 0.18 : 0.14)
-                                    : PowerFlowTheme.nestedTileFill(for: colorScheme)
+                                    ? gold.opacity(colorScheme == .dark ? 0.22 : 0.16)
+                                    : PowerFlowTheme.nestedTileFill(for: colorScheme, contrast: colorSchemeContrast)
+                            )
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(
+                                isActive
+                                    ? gold.opacity(colorScheme == .dark ? 0.56 : 0.48)
+                                    : PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast),
+                                lineWidth: isActive ? 1 : 0.5
                             )
                     )
             }
@@ -147,19 +183,21 @@ struct AdapterSection: View {
             PowerFlowChip(
                 icon: "pause.circle",
                 text: "\(L10n.string(.standby, language: language)) · \(standby.portLabel)",
-                tint: PowerFlowTheme.mutedLabel(for: colorScheme)
+                tint: PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
             )
             Text(standby.connectedDeviceName ?? standby.name ?? L10n.string(.powerAdapter, language: language))
-                .font(.system(size: 10.5))
-                .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme))
+                .font(PowerFlowTheme.Typography.captionFloor)
+                .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 4)
             if standby.ratedWatts > 0.5 {
                 Text("\(Int(standby.ratedWatts.rounded())) W")
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(PowerFlowTheme.Typography.captionFloor)
+                    .fontWeight(.medium)
                     .monospacedDigit()
-                    .foregroundStyle(PowerFlowTheme.secondaryValue(for: colorScheme))
+                    .foregroundStyle(PowerFlowTheme.secondaryValue(for: colorScheme, contrast: colorSchemeContrast))
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
     }

@@ -1,21 +1,21 @@
 import CoreGraphics
 
 /// Places the nodes of a `FlowGraph` and routes the links between them.
-struct FlowLayout: Equatable {
+struct FlowLayout: Equatable, Sendable {
     /// Cubic curve from one connection point to another.
-    struct Route: Equatable {
+    struct Route: Equatable, Sendable {
         let start: CGPoint
         let control1: CGPoint
         let control2: CGPoint
         let end: CGPoint
 
-        /// S-curve between two columns.
+        /// Silky S-curve between two columns using 0.52 horizontal control handles.
         static func across(from start: CGPoint, to end: CGPoint) -> Route {
-            let middle = (start.x + end.x) / 2
+            let deltaX = end.x - start.x
             return Route(
                 start: start,
-                control1: CGPoint(x: middle, y: start.y),
-                control2: CGPoint(x: middle, y: end.y),
+                control1: CGPoint(x: start.x + deltaX * 0.52, y: start.y),
+                control2: CGPoint(x: end.x - deltaX * 0.52, y: end.y),
                 end: end
             )
         }
@@ -26,15 +26,15 @@ struct FlowLayout: Equatable {
         }
     }
 
-    static let sourceSize = CGSize(width: 108, height: 46)
-    static let deviceSize = CGSize(width: 100, height: 38)
-    static let hubSize = CGSize(width: 86, height: 66)
-    static let wideHubSize = CGSize(width: 116, height: 66)
+    static let sourceSize = CGSize(width: 118, height: 50)
+    static let deviceSize = CGSize(width: 112, height: 42)
+    static let hubSize = CGSize(width: 82, height: 70)
+    static let wideHubSize = CGSize(width: 116, height: 70)
 
     private static let inset: CGFloat = 10
     private static let sourceSpacing: CGFloat = 16
     /// Room for the visible flow from charger to battery.
-    private static let chargingSpacing: CGFloat = 40
+    private static let chargingSpacing: CGFloat = 42
     private static let deviceSpacing: CGFloat = 8
     private static let attachmentSpacing: CGFloat = 18
 
@@ -64,18 +64,24 @@ struct FlowLayout: Equatable {
             into: &frames
         )
 
-        // The Mac sits between sources and devices, or at the far end when nothing draws from it.
+        // The Mac sits centered in the corridor between sources and devices, or at the far end when nothing draws from it.
         let hubSize = graph.outputs.isEmpty ? Self.wideHubSize : Self.hubSize
         let hubX: CGFloat
         if graph.outputs.isEmpty {
             hubX = graph.sources.isEmpty ? (width - hubSize.width) / 2 : width - Self.inset - hubSize.width
         } else {
-            hubX = (width - hubSize.width) / 2
+            let deviceX = width - Self.inset - Self.deviceSize.width
+            if graph.sources.isEmpty {
+                hubX = (deviceX - hubSize.width) / 2
+            } else {
+                let sourcesRight = Self.inset + Self.sourceSize.width
+                hubX = sourcesRight + (deviceX - sourcesRight - hubSize.width) / 2
+            }
             Self.stack(
                 graph.outputs,
                 size: Self.deviceSize,
                 spacing: Self.deviceSpacing,
-                x: width - Self.inset - Self.deviceSize.width,
+                x: deviceX,
                 midY: midY,
                 into: &frames
             )
