@@ -51,17 +51,17 @@ struct SettingsView: View {
         HStack(spacing: 11) {
             ZStack {
                 RoundedRectangle(cornerRadius: 9.5, style: .continuous)
-                    .fill(PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast).opacity(colorScheme == .dark ? 0.16 : 0.14))
+                    .fill(PowerFlowTheme.themeBlue(for: colorScheme, contrast: colorSchemeContrast).opacity(colorScheme == .dark ? 0.16 : 0.14))
                     .overlay(
                         RoundedRectangle(cornerRadius: 9.5, style: .continuous)
                             .strokeBorder(
-                                PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast).opacity(colorScheme == .dark ? 0.36 : 0.30),
+                                PowerFlowTheme.themeBlue(for: colorScheme, contrast: colorSchemeContrast).opacity(colorScheme == .dark ? 0.36 : 0.30),
                                 lineWidth: 0.75
                             )
                     )
                 Image(systemName: "bolt.batteryblock.fill")
                     .font(.system(size: 15.5, weight: .semibold))
-                    .foregroundStyle(PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast))
+                    .foregroundStyle(PowerFlowTheme.themeBlue(for: colorScheme, contrast: colorSchemeContrast))
             }
             .frame(width: 32, height: 32)
 
@@ -85,7 +85,7 @@ struct SettingsView: View {
                     : L10n.string(.flowUnknown, language: language),
                 tint: monitor.snapshot.isEffectivelyOnAC
                     ? PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
-                    : PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast)
+                    : PowerFlowTheme.themeBlue(for: colorScheme, contrast: colorSchemeContrast)
             )
         }
         .padding(.horizontal, 20)

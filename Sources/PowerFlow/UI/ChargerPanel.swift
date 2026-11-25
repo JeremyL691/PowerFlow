@@ -1,50 +1,37 @@
 import SwiftUI
 
-struct AdapterSection: View {
+/// Charger detail tab: connected adapter metering, PD profiles and standby adapters.
+struct ChargerPanel: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     let snapshot: PowerSnapshot
     let settings: PowerSettings
+    var isVisible: Bool = true
 
     private var language: AppLanguage { settings.appLanguage }
     private var adapter: AdapterSourceInfo? { snapshot.activeAdapter }
-    private var gold: Color { PowerFlowTheme.acGold(for: colorScheme, contrast: colorSchemeContrast) }
-    private var isQuiet: Bool { !snapshot.isEffectivelyOnAC && snapshot.standbyAdapters.isEmpty }
+    private var blue: Color { PowerFlowTheme.themeBlue(for: colorScheme, contrast: colorSchemeContrast) }
 
     var body: some View {
-        PopoverSection(
-            icon: "powerplug.fill",
-            tint: snapshot.isEffectivelyOnAC
-                ? gold
-                : PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast),
-            title: L10n.string(.powerAdapterSpecs, language: language),
-            isQuiet: isQuiet
-        ) {
-            if snapshot.isEffectivelyOnAC {
-                PowerFlowChip(
-                    icon: PowerFlowTheme.portSymbol(for: adapter?.portKind ?? .unknown),
-                    text: adapter?.portLabel ?? L10n.string(.portUnknown, language: language),
-                    tint: gold
-                )
-            } else {
-                Text(L10n.string(.noAdapterConnected, language: language))
-                    .font(PowerFlowTheme.Typography.captionFloor)
-                    .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-        } content: {
-            if snapshot.isEffectivelyOnAC {
-                connectedContent
-            } else if !snapshot.standbyAdapters.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(snapshot.standbyAdapters) { standby in
-                        standbyRow(standby)
-                    }
+        if snapshot.isEffectivelyOnAC {
+            connectedContent
+        } else {
+            VStack(alignment: .leading, spacing: 7) {
+                VStack(spacing: 6) {
+                    Image(systemName: "powerplug")
+                        .font(.system(size: 22, weight: .regular))
+                        .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
+                    Text(L10n.string(.noAdapterConnected, language: language))
+                        .font(.system(size: 12))
+                        .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
+                        .lineLimit(1)
                 }
-            } else {
-                EmptyView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                ForEach(snapshot.standbyAdapters) { standby in
+                    standbyRow(standby)
+                }
             }
         }
     }
@@ -52,40 +39,60 @@ struct AdapterSection: View {
     @ViewBuilder
     private var connectedContent: some View {
         VStack(alignment: .leading, spacing: 7) {
-            if !headline.isEmpty {
-                Text(headline)
-                    .font(PowerFlowTheme.Typography.rowLabel)
-                    .fontWeight(.medium)
-                    .foregroundStyle(PowerFlowTheme.secondaryValue(for: colorScheme, contrast: colorSchemeContrast))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
+            HStack(alignment: .center, spacing: 14) {
+                GaugeRing(
+                    fraction: ratedWatts > 0.5 ? snapshot.adapterInputPowerW / ratedWatts : 0,
+                    tint: blue,
+                    lineWidth: 6.5,
+                    isVisible: isVisible
+                ) {
+                    VStack(spacing: 0) {
+                        MetricValueText(
+                            text: PowerFormatters.watts(snapshot.adapterInputPowerW, decimals: 1),
+                            valueFont: .system(size: 16, weight: .semibold, design: .rounded),
+                            unitFont: PowerFlowTheme.Typography.unit,
+                            valueColor: PowerFlowTheme.primaryValue(for: colorScheme, contrast: colorSchemeContrast),
+                            unitColor: PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
+                        )
+                        if ratedWatts > 0.5 {
+                            Text("/ \(Int(ratedWatts.rounded())) W")
+                                .font(PowerFlowTheme.Typography.captionFloor)
+                                .monospacedDigit()
+                                .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.horizontal, 5)
+                }
+                .frame(width: 76, height: 76)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(L10n.string(.power, language: language))
+                .accessibilityValue(PowerFormatters.watts(snapshot.adapterInputPowerW, decimals: 1))
 
-            if ratedWatts > 0.5 {
-                ProgressLine(
-                    fraction: snapshot.adapterInputPowerW / ratedWatts,
-                    tint: gold,
-                    height: 5
-                )
-                .padding(.vertical, 1)
-            }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(headline.isEmpty ? L10n.string(.powerAdapter, language: language) : headline)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme, contrast: colorSchemeContrast))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 6)
+                        HStack(spacing: 3.5) {
+                            Image(systemName: PowerFlowTheme.portSymbol(for: adapter?.portKind ?? .unknown))
+                                .font(.system(size: 10, weight: .semibold))
+                            Text(adapter?.portLabel ?? L10n.string(.portUnknown, language: language))
+                                .font(PowerFlowTheme.Typography.captionFloor)
+                                .fontWeight(.semibold)
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(blue)
+                        .fixedSize(horizontal: true, vertical: false)
+                    }
 
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
-                GridRow {
-                    KeyValueRow(
-                        label: L10n.string(.power, language: language),
-                        value: ofRated(
-                            PowerFormatters.watts(snapshot.adapterInputPowerW, decimals: 1),
-                            rated: ratedWatts > 0.5 ? "\(Int(ratedWatts.rounded())) W" : nil
-                        ),
-                        valueColor: gold
-                    )
                     KeyValueRow(
                         label: L10n.string(.voltage, language: language),
                         value: PowerFormatters.volts(snapshot.adapterInputVoltageV)
                     )
-                }
-                GridRow {
                     KeyValueRow(
                         label: L10n.string(.current, language: language),
                         value: ofRated(
@@ -143,7 +150,7 @@ struct AdapterSection: View {
                     .monospacedDigit()
                     .foregroundStyle(
                         isActive
-                            ? gold
+                            ? blue
                             : PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
                     )
                     .lineLimit(1)
@@ -152,22 +159,24 @@ struct AdapterSection: View {
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3.5)
                     .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        Capsule(style: .continuous)
                             .fill(
                                 isActive
-                                    ? gold.opacity(colorScheme == .dark ? 0.22 : 0.16)
-                                    : PowerFlowTheme.nestedTileFill(for: colorScheme, contrast: colorSchemeContrast)
+                                    ? blue.opacity(0.2)
+                                    : PowerFlowTheme.tileFill(for: colorScheme, contrast: colorSchemeContrast)
                             )
                     )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(
-                                isActive
-                                    ? gold.opacity(colorScheme == .dark ? 0.56 : 0.48)
-                                    : PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast),
-                                lineWidth: isActive ? 1 : 0.5
-                            )
-                    )
+                    .overlay {
+                        if colorSchemeContrast == .increased {
+                            Capsule(style: .continuous)
+                                .strokeBorder(
+                                    isActive
+                                        ? blue.opacity(0.5)
+                                        : PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast),
+                                    lineWidth: 0.7
+                                )
+                        }
+                    }
             }
         }
     }

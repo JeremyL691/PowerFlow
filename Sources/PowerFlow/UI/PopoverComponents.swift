@@ -1,97 +1,46 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 
-/// Titled L2 telemetry container shared across popover sections.
-/// When `isQuiet` is true, collapses into a sleek single-line matte strip for idle/unplugged states.
-struct PopoverSection<Trailing: View, Content: View>: View {
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+/// Big value with a smaller secondary unit, split out of a formatted PowerFormatters string.
+struct MetricValueText: View {
+    let text: String
+    let valueFont: Font
+    let unitFont: Font
+    let valueColor: Color
+    let unitColor: Color
 
-    let icon: String
-    let tint: Color
-    let title: String
-    let isQuiet: Bool
-    @ViewBuilder let trailing: Trailing
-    @ViewBuilder let content: Content
-
-    init(
-        icon: String,
-        tint: Color,
-        title: String,
-        isQuiet: Bool = false,
-        @ViewBuilder trailing: () -> Trailing,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.icon = icon
-        self.tint = tint
-        self.title = title
-        self.isQuiet = isQuiet
-        self.trailing = trailing()
-        self.content = content()
+    private var parts: (value: String, unit: String) {
+        if text.hasSuffix("%"), text.count > 1 {
+            return (String(text.dropLast()), "%")
+        }
+        if let lastSpace = text.lastIndex(of: " ") {
+            return (
+                String(text[text.startIndex..<lastSpace]),
+                String(text[text.index(after: lastSpace)...])
+            )
+        }
+        return (text, "")
     }
 
     var body: some View {
-        if isQuiet {
-            HStack(alignment: .center, spacing: 7) {
-                Image(systemName: icon)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .frame(width: 14, alignment: .center)
-                Text(title)
-                    .font(PowerFlowTheme.Typography.sectionTitle)
-                    .foregroundStyle(PowerFlowTheme.secondaryValue(for: colorScheme, contrast: colorSchemeContrast))
+        HStack(alignment: .firstTextBaseline, spacing: 3) {
+            Text(parts.value)
+                .font(valueFont)
+                .monospacedDigit()
+                .powerFlowNumericTransition(value: parts.value)
+                .foregroundStyle(valueColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .allowsTightening(true)
+            if !parts.unit.isEmpty {
+                Text(parts.unit)
+                    .font(unitFont)
+                    .foregroundStyle(unitColor)
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 8)
-                content
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                trailing
+                    .fixedSize()
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 8.5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .powerFlowSurface(.quietStrip, cornerRadius: 13)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .center, spacing: 6) {
-                    Image(systemName: icon)
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(tint)
-                        .frame(width: 14, alignment: .center)
-                    Text(title)
-                        .font(PowerFlowTheme.Typography.sectionTitle)
-                        .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme, contrast: colorSchemeContrast))
-                        .lineLimit(1)
-                    Spacer(minLength: 6)
-                    trailing
-                }
-                content
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .powerFlowSurface(.telemetryGroup, cornerRadius: 13)
         }
-    }
-}
-
-extension PopoverSection where Trailing == EmptyView {
-    init(
-        icon: String,
-        tint: Color,
-        title: String,
-        isQuiet: Bool = false,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.init(
-            icon: icon,
-            tint: tint,
-            title: title,
-            isQuiet: isQuiet,
-            trailing: { EmptyView() },
-            content: content
-        )
     }
 }
 
@@ -121,7 +70,7 @@ struct KeyValueRow: View {
 
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(label)
-                .font(PowerFlowTheme.Typography.rowLabel)
+                .font(PowerFlowTheme.Typography.popoverRowLabel)
                 .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -133,114 +82,112 @@ struct KeyValueRow: View {
                         .foregroundStyle(resolvedValueColor)
                 }
                 Text(value)
-                    .font(PowerFlowTheme.Typography.rowValue)
+                    .font(PowerFlowTheme.Typography.popoverRowValue)
                     .foregroundStyle(resolvedValueColor)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
-                    .powerFlowNumericTransition()
+                    .powerFlowNumericTransition(value: value)
             }
         }
     }
 }
 
-struct ProgressLine: View {
+/// Miniature ring gauge in the hero ring's visual language; callers overlay the
+/// center content and own the accessibility label/value.
+struct GaugeRing<Center: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let fraction: Double
     let tint: Color
-    let limitFraction: Double?
-    let height: CGFloat
+    let lineWidth: CGFloat
+    let isVisible: Bool
+    let center: Center
+
+    @State private var hasRevealed = false
+    @State private var displayedFraction: Double = 0
 
     init(
         fraction: Double,
         tint: Color,
-        limitFraction: Double? = nil,
-        height: CGFloat = 4
+        lineWidth: CGFloat,
+        isVisible: Bool = true,
+        @ViewBuilder center: () -> Center
     ) {
         self.fraction = fraction
         self.tint = tint
-        self.limitFraction = limitFraction
-        self.height = height
+        self.lineWidth = lineWidth
+        self.isVisible = isVisible
+        self.center = center()
+    }
+
+    private var clampedFraction: Double {
+        fraction.isFinite ? min(1.0, max(0.0, fraction)) : 0
+    }
+
+    private var shown: Double {
+        if reduceMotion {
+            return (isVisible || hasRevealed) ? clampedFraction : 0
+        }
+        return displayedFraction
     }
 
     var body: some View {
-        let clamped = min(1.0, max(0.0, fraction))
-        let showLimitTick = limitFraction.map { $0 > 0.02 && $0 < 0.999 } ?? false
-
-        GeometryReader { geo in
-            let fillWidth = max(clamped > 0.005 ? max(height, 4) : 0, geo.size.width * clamped)
-
-            ZStack(alignment: .leading) {
-                // Recessed gauge trough
-                Capsule(style: .continuous)
-                    .fill(trackFill)
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .strokeBorder(
-                                PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast)
-                                    .opacity(colorSchemeContrast == .increased ? 0.9 : 0.65),
-                                lineWidth: 0.5
-                            )
-                    )
-
-                // Luminous progress bar with subtle top sheen
-                Capsule(style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [tint.opacity(0.84), tint],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.white.opacity(colorScheme == .dark ? 0.28 : 0.34), .clear],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                    )
-                    .frame(width: min(geo.size.width, fillWidth))
-                    .animation(reduceMotion ? nil : .spring(duration: 0.38, bounce: 0.12), value: clamped)
-
-                // Crisp Charge-Limit Tick marker when < 100%
-                if showLimitTick, let limit = limitFraction {
-                    let clampedLimit = min(0.995, max(0.02, limit))
-                    let tickX = geo.size.width * clampedLimit
-                    let tickHeight = height + 4
-
-                    Capsule(style: .continuous)
-                        .fill(colorScheme == .dark ? Color.white.opacity(0.94) : Color(white: 0.14).opacity(0.88))
-                        .frame(width: 2, height: tickHeight)
-                        .overlay(
-                            Capsule(style: .continuous)
-                                .strokeBorder(
-                                    colorScheme == .dark ? Color.black.opacity(0.55) : Color.white.opacity(0.88),
-                                    lineWidth: 0.5
-                                )
-                        )
-                        .position(x: tickX, y: height / 2)
+        ZStack {
+            Circle()
+                .stroke(
+                    PowerFlowTheme.gaugeTrack(for: colorScheme, contrast: colorSchemeContrast),
+                    lineWidth: lineWidth
+                )
+            Circle()
+                .trim(from: 0, to: shown)
+                .stroke(
+                    AngularGradient(
+                        colors: [tint.opacity(0.7), tint],
+                        center: .center
+                    ),
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+            center
+        }
+        .onAppear {
+            guard isVisible, !hasRevealed else { return }
+            reveal()
+        }
+        .onChange(of: isVisible) { _, visible in
+            guard visible else { return }
+            if !hasRevealed {
+                reveal()
+            } else if reduceMotion {
+                displayedFraction = clampedFraction
+            } else {
+                withAnimation(PowerFlowTheme.Motion.value) {
+                    displayedFraction = clampedFraction
                 }
             }
         }
-        .frame(height: height)
-        .padding(.vertical, showLimitTick ? 2 : 0)
+        .onChange(of: clampedFraction) { _, newValue in
+            guard isVisible, hasRevealed else { return }
+            if reduceMotion {
+                displayedFraction = newValue
+            } else {
+                withAnimation(PowerFlowTheme.Motion.value) {
+                    displayedFraction = newValue
+                }
+            }
+        }
     }
 
-    private var trackFill: Color {
-        switch (colorScheme, colorSchemeContrast) {
-        case (.dark, .increased):
-            return Color.white.opacity(0.18)
-        case (.dark, _):
-            return Color.white.opacity(0.095)
-        case (_, .increased):
-            return Color.black.opacity(0.16)
-        default:
-            return Color.black.opacity(0.08)
+    private func reveal() {
+        hasRevealed = true
+        if reduceMotion {
+            displayedFraction = clampedFraction
+        } else {
+            withAnimation(PowerFlowTheme.Motion.reveal) {
+                displayedFraction = clampedFraction
+            }
         }
     }
 }
@@ -272,7 +219,7 @@ struct CopyableSerialRow: View {
 
         HStack(alignment: .center, spacing: 6) {
             Text(label)
-                .font(PowerFlowTheme.Typography.rowLabel)
+                .font(PowerFlowTheme.Typography.popoverRowLabel)
                 .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
                 .lineLimit(1)
                 .layoutPriority(1)
@@ -311,29 +258,29 @@ struct CopyableSerialRow: View {
                                     : PowerFlowTheme.nestedTileFill(for: colorScheme, contrast: colorSchemeContrast))
                         )
                 )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(
-                            isCopied
-                                ? green.opacity(isDark ? 0.45 : 0.36)
-                                : (isHovered
-                                    ? PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast).opacity(1.8)
-                                    : PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast)),
-                            lineWidth: isCopied ? 0.7 : 0.5
-                        )
-                )
+                .overlay {
+                    if colorSchemeContrast == .increased {
+                        Capsule(style: .continuous)
+                            .strokeBorder(
+                                isCopied
+                                    ? green.opacity(0.45)
+                                    : PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast),
+                                lineWidth: 0.7
+                            )
+                    }
+                }
             }
             .buttonStyle(.plain)
             .onHover { hovering in
                 if reduceMotion {
                     isHovered = hovering
                 } else {
-                    withAnimation(.easeOut(duration: 0.14)) {
+                    withAnimation(PowerFlowTheme.Motion.hover) {
                         isHovered = hovering
                     }
                 }
             }
-            .animation(reduceMotion ? nil : .snappy(duration: 0.20), value: isCopied)
+            .animation(reduceMotion ? nil : PowerFlowTheme.Motion.value, value: isCopied)
             .help(L10n.tr("Click to copy serial number", zh: "点击复制序列号", language: language))
         }
         .task(id: isCopied) {
@@ -351,7 +298,7 @@ struct CopyableSerialRow: View {
     }
 }
 
-/// Tactile toolbar icon button with hover feedback, optional destructive hover wash, and spring press scale.
+/// 28x28 circular toolbar icon button; Liquid Glass on macOS 26, material circle below.
 struct PopoverIconButton: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
@@ -391,19 +338,12 @@ struct PopoverIconButton: View {
             Image(systemName: symbol)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(iconColor)
-                .frame(width: 30, height: 28)
-                .powerFlowSurface(.interactiveControl(isHovered: isHovered, isSelected: false), cornerRadius: 8.5)
+                .frame(width: 28, height: 28)
+                .powerFlowSurface(.control(isHovered: isHovered), cornerRadius: 14)
                 .overlay {
                     if isDestructiveActive {
-                        let shape = RoundedRectangle(cornerRadius: 8.5, style: .continuous)
-                        shape
+                        Circle()
                             .fill(destructiveTint.opacity(colorScheme == .dark ? 0.16 : 0.11))
-                            .overlay(
-                                shape.strokeBorder(
-                                    destructiveTint.opacity(colorScheme == .dark ? 0.44 : 0.34),
-                                    lineWidth: 0.75
-                                )
-                            )
                             .allowsHitTesting(false)
                     }
                 }
@@ -413,7 +353,7 @@ struct PopoverIconButton: View {
             if reduceMotion {
                 isHovered = hovering
             } else {
-                withAnimation(.easeOut(duration: 0.14)) {
+                withAnimation(PowerFlowTheme.Motion.hover) {
                     isHovered = hovering
                 }
             }
@@ -428,8 +368,117 @@ private struct PopoverIconButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.94 : 1.0)
-            .opacity(configuration.isPressed ? 0.86 : 1.0)
-            .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.92 : 1.0)
+            .animation(reduceMotion ? nil : PowerFlowTheme.Motion.press, value: configuration.isPressed)
+    }
+}
+
+/// Six-point status dot whose ripple runs in the render server instead of a SwiftUI timer.
+struct LivePulseView: NSViewRepresentable {
+    var tint: NSColor
+    var isPulsing: Bool
+
+    func makeNSView(context: Context) -> LivePulseNSView {
+        LivePulseNSView()
+    }
+
+    func updateNSView(_ view: LivePulseNSView, context: Context) {
+        view.apply(tint: tint, isPulsing: isPulsing)
+    }
+}
+
+@MainActor
+final class LivePulseNSView: NSView {
+    private let dotLayer = CAShapeLayer()
+    private let rippleLayer = CAShapeLayer()
+    private var tint: NSColor?
+    private var isPulsing = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        rippleLayer.fillColor = nil
+        rippleLayer.lineWidth = 1
+        layer?.addSublayer(rippleLayer)
+        layer?.addSublayer(dotLayer)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            rippleLayer.removeAllAnimations()
+        } else {
+            syncRipple()
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        let rect = CGRect(
+            x: bounds.midX - 3,
+            y: bounds.midY - 3,
+            width: 6,
+            height: 6
+        )
+        let circle = CGPath(ellipseIn: CGRect(origin: .zero, size: rect.size), transform: nil)
+        dotLayer.bounds = CGRect(origin: .zero, size: rect.size)
+        dotLayer.position = CGPoint(x: rect.midX, y: rect.midY)
+        dotLayer.path = circle
+        rippleLayer.bounds = dotLayer.bounds
+        rippleLayer.position = dotLayer.position
+        rippleLayer.path = circle
+    }
+
+    func apply(tint newTint: NSColor, isPulsing newPulsing: Bool) {
+        let changed = newTint != tint || newPulsing != isPulsing
+        tint = newTint
+        isPulsing = newPulsing
+
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            let resolved = (newTint.usingColorSpace(.sRGB) ?? newTint).cgColor
+            dotLayer.fillColor = resolved
+            rippleLayer.strokeColor = resolved
+            CATransaction.commit()
+        }
+
+        guard changed else { return }
+        syncRipple()
+    }
+
+    private func syncRipple() {
+        rippleLayer.removeAllAnimations()
+        guard isPulsing, window != nil else {
+            rippleLayer.isHidden = true
+            return
+        }
+        rippleLayer.isHidden = false
+
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 1.0
+        scale.toValue = 2.6
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.5
+        fade.toValue = 0.0
+
+        let group = CAAnimationGroup()
+        group.animations = [scale, fade]
+        group.duration = 1.8
+        group.repeatCount = .infinity
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        group.isRemovedOnCompletion = false
+        group.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+        rippleLayer.add(group, forKey: "ripple")
     }
 }

@@ -156,6 +156,38 @@ final class FlowGraphTests: XCTestCase {
         }
     }
 
+    func testHubSideRouteEndpointsLieOnTheHubCircle() {
+        let graphs = [
+            graph(batteryW: -12),
+            graph(adapterW: 60, batteryW: -15, onAC: true, flowMode: .adapterBatteryHybrid),
+            graph(adapterW: 60, batteryW: 35, loadW: 25, onAC: true, flowMode: .adapterCharging),
+            graph(adapterW: 60, batteryW: 20, loadW: 40, onAC: true, flowMode: .adapterCharging, outputs: [5, 4, 3]),
+            graph(adapterW: 40, loadW: 40, onAC: true, flowMode: .adapterBypass, outputs: [5, 4, 3])
+        ]
+        for graph in graphs {
+            let layout = FlowLayout(graph: graph, width: 414)
+            guard let hub = layout.frames[FlowGraph.macID] else {
+                XCTFail("no hub frame")
+                continue
+            }
+            let center = CGPoint(x: hub.midX, y: hub.midY)
+            let radius = hub.width / 2
+            for link in graph.links where link.from == FlowGraph.macID || link.to == FlowGraph.macID {
+                guard let route = layout.routes[link.id] else {
+                    XCTFail("no route for \(link.id)")
+                    continue
+                }
+                let hubPoint = link.to == FlowGraph.macID ? route.end : route.start
+                XCTAssertEqual(
+                    hypot(hubPoint.x - center.x, hubPoint.y - center.y),
+                    radius,
+                    accuracy: 0.5,
+                    "link \(link.id) endpoint not on the hub circle"
+                )
+            }
+        }
+    }
+
     func testMorePowerFlowsFasterAndThicker() {
         XCTAssertGreaterThan(FlowDynamics.pointsPerSecond(for: 60), FlowDynamics.pointsPerSecond(for: 5))
         XCTAssertGreaterThan(FlowDynamics.lineWidth(for: 60), FlowDynamics.lineWidth(for: 5))

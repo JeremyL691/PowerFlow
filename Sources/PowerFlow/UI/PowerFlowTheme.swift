@@ -1,40 +1,52 @@
 import SwiftUI
 
 enum PowerFlowSurfaceLevel: Equatable, Sendable {
-    case heroStage(accent: Color? = nil)
-    case telemetryGroup
-    case quietStrip
-    case interactiveControl(isHovered: Bool = false, isSelected: Bool = false)
+    case tile(isHovered: Bool = false)
+    case control(isHovered: Bool = false)
 }
 
 enum PowerFlowTheme {
     enum Typography {
-        static let heroSoC: Font = .system(size: 28, weight: .semibold, design: .rounded).monospacedDigit()
-        static let heroSubvalue: Font = .system(size: 11.5, weight: .medium).monospacedDigit()
-        static let sectionTitle: Font = .system(size: 12, weight: .semibold)
-        static let metricValue: Font = .system(size: 13.5, weight: .semibold, design: .rounded).monospacedDigit()
-        static let nodeHubValue: Font = .system(size: 15, weight: .semibold, design: .rounded).monospacedDigit()
-        static let nodeValue: Font = .system(size: 12.5, weight: .semibold, design: .rounded).monospacedDigit()
+        static let heroPercent: Font = .system(size: 34, weight: .semibold, design: .rounded).monospacedDigit()
+        static let heroPercentUnit: Font = .system(size: 15, weight: .semibold)
+        static let heroPower: Font = .system(size: 26, weight: .semibold, design: .rounded).monospacedDigit()
+        static let heroUnit: Font = .system(size: 13, weight: .semibold)
+        static let heroDetail: Font = .system(size: 12.5).monospacedDigit()
+        static let status: Font = .system(size: 13, weight: .semibold)
+        static let tileValue: Font = .system(size: 18, weight: .semibold, design: .rounded).monospacedDigit()
+        static let unit: Font = .system(size: 11, weight: .medium)
+        static let popoverRowLabel: Font = .system(size: 12, weight: .regular)
+        static let popoverRowValue: Font = .system(size: 12, weight: .medium).monospacedDigit()
         static let rowLabel: Font = .system(size: 11.5, weight: .regular)
-        static let rowValue: Font = .system(size: 11.5, weight: .medium).monospacedDigit()
         static let chip: Font = .system(size: 11, weight: .semibold)
         static let captionFloor: Font = .system(size: 11, weight: .regular)
         static let monoCaptionFloor: Font = .system(size: 11, weight: .medium, design: .monospaced)
     }
 
+    enum Motion {
+        static let reveal: Animation = .spring(response: 0.5, dampingFraction: 0.9)
+        static let revealStagger: Double = 0.035
+        static let tab: Animation = .spring(response: 0.42, dampingFraction: 0.86)
+        static let hover: Animation = .easeOut(duration: 0.14)
+        static let press: Animation = .spring(response: 0.25, dampingFraction: 0.7)
+        static let value: Animation = .spring(response: 0.45, dampingFraction: 0.9)
+        static let tint: Animation = .easeInOut(duration: 0.5)
+        static let reducedFade: Animation = .easeOut(duration: 0.2)
+    }
+
     // MARK: - Perceptual Semantic Palette (WCAG >= 4.5:1 text, >= 3:1 icons/borders)
 
-    /// Luminous champagne gold in Dark mode; rich burnished gold in Light mode.
-    static func acGold(for scheme: ColorScheme, contrast: ColorSchemeContrast = .standard) -> Color {
+    /// Blue theme accent: hero ring, aura, hub, adapter flow and the selected tab.
+    static func themeBlue(for scheme: ColorScheme, contrast: ColorSchemeContrast = .standard) -> Color {
         switch (scheme, contrast) {
         case (.dark, .increased):
-            return Color(red: 0.969, green: 0.898, blue: 0.659) // #F7E5A8
+            return Color(red: 0.478, green: 0.722, blue: 1.000) // #7AB8FF
         case (.dark, _):
-            return Color(red: 0.941, green: 0.851, blue: 0.549) // #F0D98C
+            return Color(red: 0.290, green: 0.616, blue: 1.000) // #4A9DFF
         case (_, .increased):
-            return Color(red: 0.451, green: 0.290, blue: 0.000) // #734A00
+            return Color(red: 0.000, green: 0.294, blue: 0.690) // #004BB0
         default:
-            return Color(red: 0.569, green: 0.373, blue: 0.000) // #915F00
+            return Color(red: 0.000, green: 0.376, blue: 0.875) // #0060DF
         }
     }
 
@@ -64,16 +76,16 @@ enum PowerFlowTheme {
         }
     }
 
-    static func outboundCyan(for scheme: ColorScheme, contrast: ColorSchemeContrast = .standard) -> Color {
+    static func outboundTeal(for scheme: ColorScheme, contrast: ColorSchemeContrast = .standard) -> Color {
         switch (scheme, contrast) {
         case (.dark, .increased):
-            return Color(red: 0.471, green: 0.878, blue: 1.000) // #78E0FF
+            return Color(red: 0.478, green: 0.922, blue: 0.859) // #7AEBDB
         case (.dark, _):
-            return Color(red: 0.290, green: 0.831, blue: 1.000) // #4AD4FF
+            return Color(red: 0.243, green: 0.859, blue: 0.776) // #3EDBC6
         case (_, .increased):
-            return Color(red: 0.000, green: 0.322, blue: 0.478) // #00527A
+            return Color(red: 0.000, green: 0.373, blue: 0.329) // #005F54
         default:
-            return Color(red: 0.000, green: 0.420, blue: 0.620) // #006B9E
+            return Color(red: 0.000, green: 0.475, blue: 0.420) // #00796B
         }
     }
 
@@ -92,6 +104,34 @@ enum PowerFlowTheme {
 
     // MARK: - Surface & Elevation Tokens
 
+    /// Quiet matte fill for tiles and the detail panel.
+    static func tileFill(for scheme: ColorScheme, contrast: ColorSchemeContrast = .standard, isHovered: Bool = false) -> Color {
+        switch (scheme, contrast) {
+        case (.dark, .increased):
+            return Color.white.opacity(isHovered ? 0.12 : 0.09)
+        case (.dark, _):
+            return Color.white.opacity(isHovered ? 0.085 : 0.055)
+        case (_, .increased):
+            return Color.black.opacity(isHovered ? 0.09 : 0.06)
+        default:
+            return Color.black.opacity(isHovered ? 0.06 : 0.035)
+        }
+    }
+
+    /// Shared gauge track: hero ring and every GaugeRing stroke it with the same tone.
+    static func gaugeTrack(for scheme: ColorScheme, contrast: ColorSchemeContrast = .standard) -> Color {
+        switch (scheme, contrast) {
+        case (.dark, .increased):
+            return Color.white.opacity(0.20)
+        case (.dark, _):
+            return Color.white.opacity(0.10)
+        case (_, .increased):
+            return Color.black.opacity(0.16)
+        default:
+            return Color.black.opacity(0.07)
+        }
+    }
+
     /// L2 quiet recessed matte fill for telemetry groups and sub-tiles.
     static func nestedTileFill(for scheme: ColorScheme, contrast: ColorSchemeContrast = .standard) -> Color {
         switch (scheme, contrast) {
@@ -103,20 +143,6 @@ enum PowerFlowTheme {
             return Color.black.opacity(0.055)
         default:
             return Color.black.opacity(0.030)
-        }
-    }
-
-    /// L1 Hero Stage base tint: Space Black (#14161B) in Dark mode, Frosted Silver (#F6F7FA) in Light mode.
-    static func heroStageFill(for scheme: ColorScheme, contrast: ColorSchemeContrast = .standard) -> Color {
-        switch (scheme, contrast) {
-        case (.dark, .increased):
-            return Color(red: 0.078, green: 0.086, blue: 0.106).opacity(0.84)
-        case (.dark, _):
-            return Color(red: 0.078, green: 0.086, blue: 0.106).opacity(0.72)
-        case (_, .increased):
-            return Color(red: 0.965, green: 0.969, blue: 0.980).opacity(0.92)
-        default:
-            return Color(red: 0.965, green: 0.969, blue: 0.980).opacity(0.82)
         }
     }
 
@@ -145,36 +171,6 @@ enum PowerFlowTheme {
         default:
             return Color.black.opacity(0.075)
         }
-    }
-
-    /// Directional top-lit specular hairline rim for elevated surfaces and sculptural nodes.
-    static func specularRimGradient(for scheme: ColorScheme, contrast: ColorSchemeContrast = .standard) -> LinearGradient {
-        let stops: [Gradient.Stop]
-        switch (scheme, contrast) {
-        case (.dark, .increased):
-            stops = [
-                .init(color: Color.white.opacity(0.46), location: 0.0),
-                .init(color: Color.white.opacity(0.26), location: 1.0)
-            ]
-        case (.dark, _):
-            stops = [
-                .init(color: Color.white.opacity(0.22), location: 0.0),
-                .init(color: Color.white.opacity(0.09), location: 0.38),
-                .init(color: Color.white.opacity(0.04), location: 1.0)
-            ]
-        case (_, .increased):
-            stops = [
-                .init(color: Color.black.opacity(0.34), location: 0.0),
-                .init(color: Color.black.opacity(0.22), location: 1.0)
-            ]
-        default:
-            stops = [
-                .init(color: Color.white.opacity(0.82), location: 0.0),
-                .init(color: Color.white.opacity(0.42), location: 0.45),
-                .init(color: Color.white.opacity(0.22), location: 1.0)
-            ]
-        }
-        return LinearGradient(stops: stops, startPoint: .top, endPoint: .bottom)
     }
 
     // MARK: - Neutral Ink Tokens (Never pure #000 / #FFF)
@@ -321,20 +317,51 @@ extension View {
         }
     }
 
+    /// Numeric-text roll plus Motion.value keyed on the displayed value, so live
+    /// digits drift instead of snapping. Identity under Reduce Motion.
     @MainActor
-    func powerFlowNumericTransition() -> some View {
-        modifier(PowerFlowNumericTransitionModifier())
+    func powerFlowNumericTransition<Value: Equatable>(value: Value) -> some View {
+        modifier(PowerFlowValueTransitionModifier(value: value))
+    }
+
+    @MainActor
+    func powerFlowReveal(index: Int, hasAppeared: Bool, reduceMotion: Bool) -> some View {
+        modifier(PowerFlowReveal(index: index, hasAppeared: hasAppeared, reduceMotion: reduceMotion))
     }
 }
 
-private struct PowerFlowNumericTransitionModifier: ViewModifier {
+private struct PowerFlowValueTransitionModifier<Value: Equatable>: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let value: Value
+
+    func body(content: Content) -> some View {
+        content
+            .contentTransition(reduceMotion ? .identity : .numericText())
+            .animation(reduceMotion ? nil : PowerFlowTheme.Motion.value, value: value)
+    }
+}
+
+/// Staggered entrance: fade, rise, un-blur and un-squash in one Motion.reveal spring.
+struct PowerFlowReveal: ViewModifier {
+    let index: Int
+    let hasAppeared: Bool
+    let reduceMotion: Bool
 
     func body(content: Content) -> some View {
         if reduceMotion {
-            content.contentTransition(.identity)
+            content
+                .opacity(hasAppeared ? 1 : 0)
+                .animation(PowerFlowTheme.Motion.reducedFade, value: hasAppeared)
         } else {
-            content.contentTransition(.numericText())
+            content
+                .opacity(hasAppeared ? 1 : 0)
+                .offset(y: hasAppeared ? 0 : 8)
+                .scaleEffect(hasAppeared ? 1 : 0.985, anchor: .top)
+                .animation(
+                    PowerFlowTheme.Motion.reveal.delay(Double(index) * PowerFlowTheme.Motion.revealStagger),
+                    value: hasAppeared
+                )
         }
     }
 }
@@ -351,188 +378,70 @@ private struct PowerFlowSurfaceModifier: ViewModifier {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
         switch level {
-        case .heroStage(let accent):
-            heroStageBody(content: content, accent: accent, shape: shape)
-
-        case .telemetryGroup:
+        case .tile(let isHovered):
             content
                 .background(
-                    shape.fill(PowerFlowTheme.nestedTileFill(for: colorScheme, contrast: colorSchemeContrast))
-                )
-                .overlay(
-                    shape.strokeBorder(
-                        PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast),
-                        lineWidth: colorSchemeContrast == .increased ? 0.85 : 0.5
-                    )
-                )
-                .clipShape(shape)
-
-        case .quietStrip:
-            content
-                .background(
-                    shape.fill(quietStripFill)
-                )
-                .overlay(
-                    shape.strokeBorder(
-                        PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast),
-                        lineWidth: colorSchemeContrast == .increased ? 0.85 : 0.5
-                    )
-                )
-                .clipShape(shape)
-
-        case .interactiveControl(let isHovered, let isSelected):
-            interactiveControlBody(
-                content: content,
-                isHovered: isHovered,
-                isSelected: isSelected,
-                shape: shape
-            )
-        }
-    }
-
-    private var quietStripFill: Color {
-        switch (colorScheme, colorSchemeContrast) {
-        case (.dark, .increased):
-            return Color.white.opacity(0.055)
-        case (.dark, _):
-            return Color.white.opacity(0.032)
-        case (_, .increased):
-            return Color.black.opacity(0.048)
-        default:
-            return Color.black.opacity(0.026)
-        }
-    }
-
-    @ViewBuilder
-    private func heroStageBody(
-        content: Content,
-        accent: Color?,
-        shape: RoundedRectangle
-    ) -> some View {
-        if #available(macOS 26.0, *) {
-            content
-                .background {
-                    shape.fill(
-                        PowerFlowTheme.heroStageFill(for: colorScheme, contrast: colorSchemeContrast)
-                            .opacity(colorScheme == .dark ? 0.62 : 0.68)
-                    )
-                    if let accent {
-                        heroAura(accent: accent)
-                    }
-                }
-                .glassEffect(
-                    accent.map { Glass.regular.tint($0.opacity(0.06)) } ?? .regular,
-                    in: shape
+                    shape.fill(PowerFlowTheme.tileFill(for: colorScheme, contrast: colorSchemeContrast, isHovered: isHovered))
                 )
                 .overlay {
-                    heroRimOverlay(shape: shape)
-                }
-                .clipShape(shape)
-        } else {
-            content
-                .background {
-                    shape.fill(.ultraThinMaterial)
-                    shape.fill(PowerFlowTheme.heroStageFill(for: colorScheme, contrast: colorSchemeContrast))
-                    if let accent {
-                        heroAura(accent: accent)
+                    if colorSchemeContrast == .increased {
+                        shape.strokeBorder(
+                            PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast),
+                            lineWidth: 0.85
+                        )
                     }
                 }
-                .overlay {
-                    heroRimOverlay(shape: shape)
-                }
                 .clipShape(shape)
-        }
-    }
 
-    private func heroAura(accent: Color) -> some View {
-        RadialGradient(
-            colors: [
-                accent.opacity(colorScheme == .dark ? 0.11 : 0.07),
-                accent.opacity(colorScheme == .dark ? 0.03 : 0.018),
-                .clear
-            ],
-            center: UnitPoint(x: 0.5, y: 0.0),
-            startRadius: 8,
-            endRadius: 210
-        )
-        .allowsHitTesting(false)
-    }
-
-    @ViewBuilder
-    private func heroRimOverlay(shape: RoundedRectangle) -> some View {
-        if colorScheme == .dark || colorSchemeContrast == .increased {
-            shape.strokeBorder(
-                PowerFlowTheme.specularRimGradient(for: colorScheme, contrast: colorSchemeContrast),
-                lineWidth: colorSchemeContrast == .increased ? 1.0 : 0.75
-            )
-        } else {
-            ZStack {
-                shape.strokeBorder(
-                    PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast),
-                    lineWidth: 0.6
-                )
-                shape
-                    .inset(by: 0.5)
-                    .strokeBorder(
-                        PowerFlowTheme.specularRimGradient(for: colorScheme, contrast: colorSchemeContrast),
-                        lineWidth: 0.75
-                    )
-            }
+        case .control(let isHovered):
+            controlBody(content: content, isHovered: isHovered, shape: shape)
         }
     }
 
     @ViewBuilder
-    private func interactiveControlBody(
+    private func controlBody(
         content: Content,
         isHovered: Bool,
-        isSelected: Bool,
         shape: RoundedRectangle
     ) -> some View {
-        let isDark = colorScheme == .dark
-        let isHighContrast = colorSchemeContrast == .increased
-
-        let borderColor: Color = if isSelected {
-            Color.accentColor.opacity(isDark ? 0.78 : 0.68)
-        } else if isHovered {
-            isDark ? Color.white.opacity(isHighContrast ? 0.45 : 0.20) : Color.black.opacity(isHighContrast ? 0.38 : 0.16)
-        } else {
-            PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast)
-        }
-        let borderWidth: CGFloat = isSelected ? 1.0 : (isHighContrast ? 0.85 : 0.55)
-
         if #available(macOS 26.0, *) {
-            let glass: Glass = if isSelected {
-                Glass.regular.tint(Color.accentColor.opacity(isDark ? 0.18 : 0.12)).interactive()
-            } else if isHovered {
-                Glass.regular.tint((isDark ? Color.white : Color.black).opacity(isDark ? 0.10 : 0.05)).interactive()
-            } else {
-                Glass.regular.interactive()
-            }
+            let glass: Glass = isHovered
+                ? Glass.regular.tint((colorScheme == .dark ? Color.white : Color.black).opacity(colorScheme == .dark ? 0.10 : 0.05)).interactive()
+                : Glass.regular.interactive()
 
             content
-                .background(shape.fill(interactiveFallbackFill(isHovered: isHovered, isSelected: isSelected).opacity(0.55)))
                 .glassEffect(glass, in: shape)
-                .overlay(shape.strokeBorder(borderColor, lineWidth: borderWidth))
-                .clipShape(shape)
+                .overlay {
+                    if colorSchemeContrast == .increased {
+                        shape.strokeBorder(
+                            PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast),
+                            lineWidth: 0.85
+                        )
+                    }
+                }
         } else {
             content
                 .background {
                     shape.fill(.ultraThinMaterial)
-                    shape.fill(interactiveFallbackFill(isHovered: isHovered, isSelected: isSelected))
+                    shape.fill(controlFallbackFill(isHovered: isHovered))
                 }
-                .overlay(shape.strokeBorder(borderColor, lineWidth: borderWidth))
+                .overlay {
+                    if colorSchemeContrast == .increased {
+                        shape.strokeBorder(
+                            PowerFlowTheme.hairlineDivider(for: colorScheme, contrast: colorSchemeContrast),
+                            lineWidth: 0.85
+                        )
+                    }
+                }
                 .clipShape(shape)
         }
     }
 
-    private func interactiveFallbackFill(isHovered: Bool, isSelected: Bool) -> Color {
+    private func controlFallbackFill(isHovered: Bool) -> Color {
         let isDark = colorScheme == .dark
-        if isSelected {
-            return Color.accentColor.opacity(isDark ? 0.18 : 0.12)
-        }
         if isHovered {
             return isDark ? Color.white.opacity(0.11) : Color.black.opacity(0.065)
         }
-        return PowerFlowTheme.nestedTileFill(for: colorScheme, contrast: colorSchemeContrast)
+        return PowerFlowTheme.tileFill(for: colorScheme, contrast: colorSchemeContrast)
     }
 }

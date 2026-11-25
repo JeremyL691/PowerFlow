@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import QuartzCore
 import SwiftUI
 
 @MainActor
@@ -20,6 +21,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
     private var settingsWindow: NSWindow?
 
     private var appearanceObservation: NSKeyValueObservation?
+    private var popoverSizeObservation: NSKeyValueObservation?
     private var buttonWindowMoveObserver: NotificationObserverToken?
     private var buttonWindowScreenObserver: NotificationObserverToken?
     private var screenParametersObserver: NotificationObserverToken?
@@ -29,6 +31,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
 
     private var lastVisualSignature: VisualSignature?
     private var lastTooltip: String?
+    private var lastTargetPopoverSize: NSSize?
     private var isPendingPopoverShow = false
     private var isClosingProgrammatically = false
     private var lastExternalCloseUptime: TimeInterval = -.greatestFiniteMagnitude
@@ -87,6 +90,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
         removeClickMonitors()
         appearanceObservation?.invalidate()
         appearanceObservation = nil
+        popoverSizeObservation?.invalidate()
+        popoverSizeObservation = nil
+        lastTargetPopoverSize = nil
 
         buttonWindowMoveObserver?.invalidate()
         buttonWindowMoveObserver = nil
@@ -122,10 +128,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
 
     /// Built on demand and released on close so a hidden popover never re-renders.
     private func makePopoverContent() -> NSViewController {
+        popoverSizeObservation?.invalidate()
+        popoverSizeObservation = nil
+        lastTargetPopoverSize = nil
+
         let visibleHeight = (statusItem.button?.window?.screen ?? NSScreen.main)?.visibleFrame.height ?? 800
+        let maxHeight = max(360, visibleHeight - 24)
         let contentView = MenuBarPopoverView(
             monitor: monitor,
-            maxHeight: visibleHeight - 24,
+            maxHeight: maxHeight,
             openSettings: { [weak self] in
                 self?.openSettings()
             },
@@ -135,11 +146,49 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
         )
         let hostingController = NSHostingController(rootView: contentView)
         hostingController.sizingOptions = .preferredContentSize
-        let fittingSize = hostingController.sizeThatFits(
+        let rawFittingSize = hostingController.sizeThatFits(
             in: NSSize(width: MenuBarPopoverView.width, height: .greatestFiniteMagnitude)
+        )
+        let fittingSize = NSSize(
+            width: MenuBarPopoverView.width,
+            height: min(rawFittingSize.height, maxHeight)
         )
         hostingController.view.frame.size = fittingSize
         popover.contentSize = fittingSize
+        lastTargetPopoverSize = fittingSize
+
+        popoverSizeObservation = hostingController.observe(
+            \.preferredContentSize,
+            options: [.new]
+        ) { @Sendable [weak self] _, change in
+            guard let preferred = change.newValue else { return }
+            Task { @MainActor [weak self] in
+                guard let self, !self.isInvalidated, self.popover.isShown else { return }
+                guard preferred.height.isFinite, preferred.height > 1 else { return }
+                let targetSize = NSSize(
+                    width: MenuBarPopoverView.width,
+                    height: min(preferred.height, maxHeight)
+                )
+                let previous = self.lastTargetPopoverSize ?? self.popover.contentSize
+                guard abs(previous.width - targetSize.width) > 1.0
+                    || abs(previous.height - targetSize.height) > 1.0
+                else {
+                    return
+                }
+                self.lastTargetPopoverSize = targetSize
+
+                if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                    self.popover.contentSize = targetSize
+                } else {
+                    NSAnimationContext.runAnimationGroup { context in
+                        context.duration = 0.22
+                        context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+                        context.allowsImplicitAnimation = true
+                        self.popover.contentSize = targetSize
+                    }
+                }
+            }
+        }
         return hostingController
     }
 
@@ -408,6 +457,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         guard popover.isShown else {
+            popoverSizeObservation?.invalidate()
+            popoverSizeObservation = nil
+            lastTargetPopoverSize = nil
             popover.contentViewController = nil
             return
         }
@@ -563,6 +615,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
         }
         isClosingProgrammatically = false
         removeClickMonitors()
+        popoverSizeObservation?.invalidate()
+        popoverSizeObservation = nil
+        lastTargetPopoverSize = nil
         popover.contentViewController = nil
         monitor.setPopoverVisible(false)
     }

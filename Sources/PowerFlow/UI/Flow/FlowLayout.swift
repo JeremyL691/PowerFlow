@@ -26,10 +26,10 @@ struct FlowLayout: Equatable, Sendable {
         }
     }
 
-    static let sourceSize = CGSize(width: 118, height: 50)
-    static let deviceSize = CGSize(width: 112, height: 42)
-    static let hubSize = CGSize(width: 82, height: 70)
-    static let wideHubSize = CGSize(width: 116, height: 70)
+    static let sourceSize = CGSize(width: 118, height: 44)
+    static let deviceSize = CGSize(width: 108, height: 40)
+    /// The Mac hub is a circle, so this is both diameter and frame.
+    static let hubSize = CGSize(width: 72, height: 72)
 
     private static let inset: CGFloat = 10
     private static let sourceSpacing: CGFloat = 16
@@ -65,7 +65,7 @@ struct FlowLayout: Equatable, Sendable {
         )
 
         // The Mac sits centered in the corridor between sources and devices, or at the far end when nothing draws from it.
-        let hubSize = graph.outputs.isEmpty ? Self.wideHubSize : Self.hubSize
+        let hubSize = Self.hubSize
         let hubX: CGFloat
         if graph.outputs.isEmpty {
             hubX = graph.sources.isEmpty ? (width - hubSize.width) / 2 : width - Self.inset - hubSize.width
@@ -107,7 +107,11 @@ struct FlowLayout: Equatable, Sendable {
             let siblings = Self.hubPeers(of: graph, onSourceSide: isSource)
             let index = siblings.firstIndex(of: peerID) ?? 0
             let offset = (CGFloat(index) - CGFloat(siblings.count - 1) / 2) * Self.attachmentSpacing
-            let hubPoint = CGPoint(x: isSource ? hub.minX : hub.maxX, y: hub.midY + offset)
+            // Attachment points lie on the hub circle, not on the bounding box.
+            let radius = hub.width / 2
+            let dy = min(abs(offset), radius)
+            let dx = (radius * radius - dy * dy).squareRoot()
+            let hubPoint = CGPoint(x: isSource ? hub.midX - dx : hub.midX + dx, y: hub.midY + offset)
             let peerPoint = CGPoint(x: isSource ? peer.maxX : peer.minX, y: peer.midY)
             routes[link.id] = link.from == FlowGraph.macID
                 ? .across(from: hubPoint, to: peerPoint)

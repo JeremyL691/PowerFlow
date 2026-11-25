@@ -27,6 +27,9 @@ struct FlowLinksView: NSViewRepresentable {
     let reduceMotion: Bool
     let isDark: Bool
     let differentiateWithoutColor: Bool
+    let hub: CGRect?
+    let hubTint: NSColor?
+    let hubWatts: Double
 
     func makeNSView(context: Context) -> FlowLinksNSView {
         FlowLinksNSView()
@@ -38,25 +41,42 @@ struct FlowLinksView: NSViewRepresentable {
             isAnimating: isAnimating,
             reduceMotion: reduceMotion,
             isDark: isDark,
-            differentiateWithoutColor: differentiateWithoutColor
+            differentiateWithoutColor: differentiateWithoutColor,
+            hub: hub,
+            hubTint: hubTint,
+            hubWatts: hubWatts
         )
     }
 }
 
-/// Draws the links and runs the moving droplets in the WindowServer render server, so the app does zero work per frame.
+/// Draws the links and runs the moving comets in the WindowServer render server, so the app does zero work per frame.
 @MainActor
 final class FlowLinksNSView: NSView {
+    private static let pingBaseDuration: CFTimeInterval = 2.4
+    private static let highFrameRate = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+
     private var layers: [String: FlowLinkLayer] = [:]
+    private var fadingLayers: [FlowLinkLayer] = []
     private var links: [FlowLinksView.LinkStyle] = []
     private var isAnimating = false
     private var reduceMotion = false
     private var isDark = false
     private var differentiateWithoutColor = false
+    private var hub: CGRect?
+    private var hubTint: NSColor?
+    private var hubWatts: Double = 0
+
+    private var pingReplicator: CAReplicatorLayer?
+    private var pingShape: CAShapeLayer?
+    private var pingActive = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
     }
+
+    /// Top-left origin matching SwiftUI, so routes and hub rects need no flip.
+    override var isFlipped: Bool { true }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
@@ -81,7 +101,10 @@ final class FlowLinksNSView: NSView {
         isAnimating newAnimating: Bool,
         reduceMotion newReduceMotion: Bool,
         isDark newIsDark: Bool,
-        differentiateWithoutColor newDifferentiate: Bool
+        differentiateWithoutColor newDifferentiate: Bool,
+        hub newHub: CGRect?,
+        hubTint newHubTint: NSColor?,
+        hubWatts newHubWatts: Double
     ) {
         guard
             newLinks != links
@@ -89,12 +112,18 @@ final class FlowLinksNSView: NSView {
                 || newReduceMotion != reduceMotion
                 || newIsDark != isDark
                 || newDifferentiate != differentiateWithoutColor
+                || newHub != hub
+                || newHubTint != hubTint
+                || newHubWatts != hubWatts
         else { return }
         links = newLinks
         isAnimating = newAnimating
         reduceMotion = newReduceMotion
         isDark = newIsDark
         differentiateWithoutColor = newDifferentiate
+        hub = newHub
+        hubTint = newHubTint
+        hubWatts = newHubWatts
         rebuild()
     }
 
@@ -109,23 +138,56 @@ final class FlowLinksNSView: NSView {
         for linkLayer in layers.values {
             linkLayer.stopAllAnimations()
         }
+        for fading in fadingLayers {
+            fading.stopAllAnimations()
+            fading.removeAllAnimations()
+            fading.removeFromSuperlayer()
+        }
+        fadingLayers.removeAll()
         CATransaction.commit()
+        pingReplicator?.removeFromSuperlayer()
+        pingReplicator = nil
+        pingShape = nil
+        pingActive = false
     }
 
     private func rebuild() {
         guard bounds.height > 0 else { return }
         let allowMotion = isAnimating && !reduceMotion && window != nil
+        let allowEntrance = window != nil && !reduceMotion
 
         effectiveAppearance.performAsCurrentDrawingAppearance {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             let currentIDs = Set(links.map(\.id))
             for (id, stale) in layers where !currentIDs.contains(id) {
-                stale.stopAllAnimations()
-                stale.removeFromSuperlayer()
                 layers[id] = nil
+                if allowEntrance {
+                    // Fade the removed conduit out, then drop it once the fade lands.
+                    stale.beginFadeOut()
+                    fadingLayers.append(stale)
+                    CATransaction.begin()
+                    CATransaction.setDisableActions(true)
+                    let fadeOut = CABasicAnimation(keyPath: "opacity")
+                    fadeOut.fromValue = stale.presentation()?.opacity ?? stale.opacity
+                    fadeOut.toValue = 0
+                    fadeOut.duration = 0.2
+                    stale.opacity = 0
+                    stale.add(fadeOut, forKey: "fadeOut")
+                    CATransaction.setCompletionBlock { [weak self, weak stale] in
+                        MainActor.assumeIsolated {
+                            guard let stale else { return }
+                            stale.removeFromSuperlayer()
+                            self?.fadingLayers.removeAll { $0 === stale }
+                        }
+                    }
+                    CATransaction.commit()
+                } else {
+                    stale.stopAllAnimations()
+                    stale.removeFromSuperlayer()
+                }
             }
-            for link in links {
+            for (index, link) in links.enumerated() {
                 let linkLayer = layers[link.id] ?? {
                     let created = FlowLinkLayer()
                     layer?.addSublayer(created)
@@ -138,41 +200,143 @@ final class FlowLinksNSView: NSView {
                     path: path(for: link.route),
                     allowMotion: allowMotion,
                     isDark: isDark,
-                    differentiateWithoutColor: differentiateWithoutColor
+                    differentiateWithoutColor: differentiateWithoutColor,
+                    allowEntrance: allowEntrance,
+                    entranceDelay: 0.12 + Double(index) * 0.07
                 )
             }
             CATransaction.commit()
         }
+
+        syncPing(allowMotion: allowMotion)
     }
 
-    /// Routes use a top-left origin; layers of this view use a bottom-left one.
-    private func path(for route: FlowLayout.Route) -> CGPath {
-        func flipped(_ point: CGPoint) -> CGPoint {
-            CGPoint(x: point.x, y: bounds.height - point.y)
+    // MARK: - Hub Ping
+
+    /// A soft ring that ripples out of the Mac hub. Built once with a fixed base
+    /// period; the pace, tint and position update in place so it never restarts.
+    private func syncPing(allowMotion: Bool) {
+        let active = allowMotion && hub != nil && hubTint != nil && hubWatts >= 0.05
+        guard active, let hub, let hubTint else {
+            pingReplicator?.removeFromSuperlayer()
+            pingReplicator = nil
+            pingShape = nil
+            pingActive = false
+            return
         }
+
+        let duration = 2.8 - min(1.2, log10(1 + max(0, hubWatts)) * 0.6)
+        let resolvedTint = hubTint.usingColorSpace(.sRGB) ?? hubTint
+
+        if pingActive, let shape = pingShape, shape.bounds.size == hub.size {
+            if let replicator = pingReplicator, replicator.frame != bounds {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                replicator.frame = bounds
+                CATransaction.commit()
+            }
+            let targetSpeed = Float(Self.pingBaseDuration / duration)
+            if let replicator = pingReplicator, abs(replicator.speed - targetSpeed) / targetSpeed > 0.08 {
+                retime(replicator, to: targetSpeed)
+            }
+            if shape.strokeColor != resolvedTint.cgColor {
+                CATransaction.begin()
+                CATransaction.setAnimationDuration(0.5)
+                CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
+                shape.strokeColor = resolvedTint.cgColor
+                CATransaction.commit()
+            }
+            let target = CGPoint(x: hub.midX, y: hub.midY)
+            if !CGPointEqualToPoint(shape.position, target) {
+                let spring = CASpringAnimation(keyPath: "position")
+                spring.mass = 1
+                spring.stiffness = 224
+                spring.damping = 25.7
+                spring.duration = spring.settlingDuration
+                spring.fromValue = shape.presentation()?.position ?? shape.position
+                spring.toValue = target
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                shape.position = target
+                CATransaction.commit()
+                shape.add(spring, forKey: "move")
+            }
+            return
+        }
+
+        pingReplicator?.removeFromSuperlayer()
+
+        let shape = CAShapeLayer()
+        shape.bounds = CGRect(origin: .zero, size: hub.size)
+        shape.position = CGPoint(x: hub.midX, y: hub.midY)
+        shape.path = CGPath(ellipseIn: shape.bounds, transform: nil)
+        shape.fillColor = nil
+        shape.strokeColor = resolvedTint.cgColor
+        shape.lineWidth = 1.5
+
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 1.0
+        scale.toValue = 1.4
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.45
+        fade.toValue = 0.0
+
+        let group = CAAnimationGroup()
+        group.animations = [scale, fade]
+        group.duration = Self.pingBaseDuration
+        group.repeatCount = .infinity
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        group.isRemovedOnCompletion = false
+        group.preferredFrameRateRange = Self.highFrameRate
+        shape.add(group, forKey: "ping")
+
+        let replicator = CAReplicatorLayer()
+        replicator.frame = bounds
+        replicator.instanceCount = 2
+        replicator.instanceDelay = Self.pingBaseDuration / 2
+        replicator.speed = Float(Self.pingBaseDuration / duration)
+        replicator.addSublayer(shape)
+        layer?.addSublayer(replicator)
+
+        pingReplicator = replicator
+        pingShape = shape
+        pingActive = true
+    }
+
+    /// Changes the clock rate without resetting the ripple phase.
+    private func retime(_ layer: CALayer, to speed: Float) {
+        let now = CACurrentMediaTime()
+        let local = layer.convertTime(now, from: nil)
+        layer.timeOffset = 0
+        layer.beginTime = 0
+        layer.speed = speed
+        layer.timeOffset = local - layer.convertTime(now, from: nil)
+    }
+
+    private func path(for route: FlowLayout.Route) -> CGPath {
         let path = CGMutablePath()
-        path.move(to: flipped(route.start))
+        path.move(to: route.start)
         path.addCurve(
-            to: flipped(route.end),
-            control1: flipped(route.control1),
-            control2: flipped(route.control2)
+            to: route.end,
+            control1: route.control1,
+            control2: route.control2
         )
         return path
     }
 }
 
-/// One precision conduit: recessed groove, wattage-scaled soft halo, vibrant calibrated track,
-/// and tangentially rotated tapered energy droplets running entirely in WindowServer CoreAnimation.
+/// One precision conduit: wattage-scaled soft halo, vibrant calibrated track, and a tangentially
+/// rotated glowing comet running entirely in WindowServer CoreAnimation.
 private final class FlowLinkLayer: CALayer {
     private static let referenceSpeed = 60.0
     private static let pulseSpacing: CGFloat = 34
-    private static let pulseLength: CGFloat = 24
-    private static let frameRate = CAFrameRateRange(minimum: 24, maximum: 60, preferred: 60)
-    private static let speedTolerance: Float = 0.05
-    private static let transitionDuration: CFTimeInterval = 0.26
-    @MainActor private static let transitionTiming = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+    private static let pulseLength: CGFloat = 28
+    private static let frameRate = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+    private static let transitionDuration: CFTimeInterval = 0.45
+    @MainActor private static let transitionTiming = CAMediaTimingFunction(controlPoints: 0.42, 0, 0.58, 1)
+    @MainActor private static let entranceTiming = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
 
-    private let grooveLayer = CAShapeLayer()
     private let haloLayer = CAShapeLayer()
     private let trackLayer = CAShapeLayer()
     private let pulses = CAReplicatorLayer()
@@ -180,16 +344,12 @@ private final class FlowLinkLayer: CALayer {
     private let pulseMask = CAShapeLayer()
 
     private var hasConfigured = false
+    private var didDrawOn = false
     private var animatedRoute: FlowLayout.Route?
-    private var animatedHeight: CGFloat = 0
-    private var animatedWidth: CGFloat = 0
+    private var appliedRoute: FlowLayout.Route?
 
     override init() {
         super.init()
-
-        grooveLayer.fillColor = nil
-        grooveLayer.lineCap = .round
-        addSublayer(grooveLayer)
 
         haloLayer.fillColor = nil
         haloLayer.lineCap = .round
@@ -225,9 +385,17 @@ private final class FlowLinkLayer: CALayer {
         pulse.removeAllAnimations()
         trackLayer.removeAllAnimations()
         haloLayer.removeAllAnimations()
-        grooveLayer.removeAllAnimations()
         pulses.isHidden = true
         animatedRoute = nil
+        appliedRoute = nil
+        didDrawOn = false
+    }
+
+    /// Freezes the comets where they are so the whole conduit can fade out intact.
+    @MainActor
+    func beginFadeOut() {
+        pulse.opacity = pulse.presentation()?.opacity ?? pulse.opacity
+        pulse.removeAllAnimations()
     }
 
     @MainActor
@@ -236,7 +404,9 @@ private final class FlowLinkLayer: CALayer {
         path: CGPath,
         allowMotion: Bool,
         isDark: Bool,
-        differentiateWithoutColor: Bool
+        differentiateWithoutColor: Bool,
+        allowEntrance: Bool,
+        entranceDelay: CFTimeInterval
     ) {
         let baseTint = link.tint.usingColorSpace(.sRGB) ?? link.tint
         let resolvedTint = Self.calibratedConduitColor(from: baseTint, isActive: link.isActive, isDark: isDark)
@@ -244,25 +414,19 @@ private final class FlowLinkLayer: CALayer {
         let shouldAnimateFlow = link.isActive && allowMotion
         let shouldAnimateTransitions = hasConfigured && allowMotion
 
-        let grooveWidth = width + 2.4
-        let grooveColor = isDark
-            ? NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.34).cgColor
-            : NSColor(srgbRed: 0.06, green: 0.08, blue: 0.14, alpha: 0.065).cgColor
-        let grooveOpacity: Float = link.isActive ? 1.0 : 0.45
-
-        let haloWidth = width * 2.1
+        let haloWidth = width * 3
         let wattsFactor = min(1.0, max(0.0, log10(1 + max(0, link.watts)) / 2.0))
         let haloOpacity: Float = if !link.isActive {
             0.0
         } else if isDark {
-            Float(0.07 + 0.08 * wattsFactor)
+            Float(0.08 + 0.10 * wattsFactor)
         } else {
-            Float(0.06 + 0.07 * wattsFactor)
+            Float(0.06 + 0.08 * wattsFactor)
         }
 
         let trackColor = resolvedTint.cgColor
         let trackOpacity: Float = if link.isActive {
-            shouldAnimateFlow ? (isDark ? 0.34 : 0.38) : 0.78
+            shouldAnimateFlow ? 0.22 : 0.7
         } else if differentiateWithoutColor {
             isDark ? 0.56 : 0.60
         } else {
@@ -270,19 +434,18 @@ private final class FlowLinkLayer: CALayer {
         }
         let dashPattern: [NSNumber]? = link.isActive ? nil : (differentiateWithoutColor ? [4, 4] : [2, 5])
 
+        // Structure moves spring the conduit path from wherever the previous
+        // route currently renders, matching the SwiftUI node spring.
+        let routeChanged = appliedRoute != nil && appliedRoute != link.route
+        let previousPath = routeChanged ? (trackLayer.presentation()?.path ?? trackLayer.path) : nil
+        appliedRoute = link.route
+
         let previousTrackWidth = trackLayer.presentation()?.lineWidth ?? trackLayer.lineWidth
         let previousTrackColor = trackLayer.presentation()?.strokeColor ?? trackLayer.strokeColor
         let previousTrackOpacity = trackLayer.presentation()?.opacity ?? trackLayer.opacity
         let previousHaloWidth = haloLayer.presentation()?.lineWidth ?? haloLayer.lineWidth
         let previousHaloColor = haloLayer.presentation()?.strokeColor ?? haloLayer.strokeColor
         let previousHaloOpacity = haloLayer.presentation()?.opacity ?? haloLayer.opacity
-        let previousGrooveWidth = grooveLayer.presentation()?.lineWidth ?? grooveLayer.lineWidth
-
-        grooveLayer.frame = bounds
-        grooveLayer.path = path
-        grooveLayer.lineWidth = grooveWidth
-        grooveLayer.strokeColor = grooveColor
-        grooveLayer.opacity = grooveOpacity
 
         haloLayer.frame = bounds
         haloLayer.path = path
@@ -301,7 +464,6 @@ private final class FlowLinkLayer: CALayer {
             if abs(previousTrackWidth - width) > 0.05 {
                 animateTransition(keyPath: "lineWidth", on: trackLayer, from: previousTrackWidth, to: width)
                 animateTransition(keyPath: "lineWidth", on: haloLayer, from: previousHaloWidth, to: haloWidth)
-                animateTransition(keyPath: "lineWidth", on: grooveLayer, from: previousGrooveWidth, to: grooveWidth)
             }
             if let previousTrackColor, previousTrackColor != trackColor {
                 animateTransition(keyPath: "strokeColor", on: trackLayer, from: previousTrackColor, to: trackColor)
@@ -318,23 +480,51 @@ private final class FlowLinkLayer: CALayer {
         } else {
             removeTransitionAnimations(on: trackLayer)
             removeTransitionAnimations(on: haloLayer)
-            removeTransitionAnimations(on: grooveLayer)
         }
         hasConfigured = true
+
+        if allowEntrance && !didDrawOn {
+            didDrawOn = true
+            for target in [trackLayer, haloLayer] {
+                let drawOn = CABasicAnimation(keyPath: "strokeEnd")
+                drawOn.fromValue = 0
+                drawOn.toValue = 1
+                drawOn.duration = 0.6
+                drawOn.timingFunction = Self.entranceTiming
+                drawOn.beginTime = CACurrentMediaTime() + entranceDelay
+                drawOn.fillMode = .backwards
+                target.add(drawOn, forKey: "drawOn")
+            }
+        }
 
         pulses.frame = bounds
         pulseMask.frame = bounds
         pulseMask.path = path
-        pulseMask.lineWidth = width
+        pulseMask.lineWidth = width + 0.5
 
-        let specularTip = resolvedTint.blended(withFraction: isDark ? 0.55 : 0.40, of: .white) ?? resolvedTint
+        if routeChanged, allowEntrance, let previousPath {
+            for target in [trackLayer, haloLayer, pulseMask] {
+                let spring = CASpringAnimation(keyPath: "path")
+                spring.mass = 1
+                spring.stiffness = 224
+                spring.damping = 25.7
+                spring.duration = spring.settlingDuration
+                spring.fromValue = previousPath
+                spring.toValue = path
+                target.add(spring, forKey: "pathSpring")
+            }
+        }
+
+        let coreColor = resolvedTint.blended(withFraction: isDark ? 0.25 : 0.15, of: .white) ?? resolvedTint
+        let headColor = resolvedTint.blended(withFraction: isDark ? 0.72 : 0.58, of: .white) ?? resolvedTint
         pulse.colors = [
             resolvedTint.withAlphaComponent(0.0).cgColor,
-            resolvedTint.withAlphaComponent(0.45).cgColor,
-            resolvedTint.withAlphaComponent(0.95).cgColor,
-            specularTip.cgColor
+            resolvedTint.withAlphaComponent(0.42).cgColor,
+            coreColor.cgColor,
+            headColor.cgColor,
+            headColor.withAlphaComponent(0.95).cgColor
         ]
-        pulse.locations = [0.0, 0.38, 0.78, 1.0]
+        pulse.locations = [0.0, 0.35, 0.72, 0.92, 1.0]
 
         guard shouldAnimateFlow else {
             pulse.removeAllAnimations()
@@ -345,9 +535,19 @@ private final class FlowLinkLayer: CALayer {
 
         pulses.isHidden = false
         setSpeed(FlowDynamics.pointsPerSecond(for: link.watts) / Self.referenceSpeed)
-        let routeChanged = animatedRoute != link.route || abs(animatedHeight - bounds.height) > 0.5
-        if routeChanged || abs(animatedWidth - width) > 0.4 || pulse.animation(forKey: "flow") == nil {
-            animate(along: path, route: link.route, height: bounds.height, width: width)
+        // Width-only changes reshape the comet in place; the travel animation is
+        // re-added only when the route actually changed (or isn't running).
+        updatePulseGeometry(width: width)
+        if animatedRoute != link.route || pulse.animation(forKey: "flow") == nil {
+            if routeChanged {
+                // Comets hop to the new path while dipped out of view.
+                let dip = CAKeyframeAnimation(keyPath: "opacity")
+                dip.values = [1.0, 0.0, 0.0, 1.0]
+                dip.keyTimes = [0.0, 0.15, 0.85, 1.0]
+                dip.duration = 0.6
+                pulses.add(dip, forKey: "routeDip")
+            }
+            animate(along: path, route: link.route, width: width)
         }
     }
 
@@ -389,20 +589,28 @@ private final class FlowLinkLayer: CALayer {
         target.removeAnimation(forKey: "transition-opacity")
     }
 
-    private func animate(along path: CGPath, route: FlowLayout.Route, height: CGFloat, width: CGFloat) {
+    /// Reshapes the comet for a new conduit width without touching its travel.
+    private func updatePulseGeometry(width: CGFloat) {
+        let cometHeight = max(2.5, width * 0.96)
+        var cometBounds = pulse.bounds
+        cometBounds.size.height = cometHeight
+        pulse.bounds = cometBounds
+        pulse.cornerRadius = cometHeight / 2
+    }
+
+    private func animate(along path: CGPath, route: FlowLayout.Route, width: CGFloat) {
         animatedRoute = route
-        animatedHeight = height
-        animatedWidth = width
 
         let length = max(1, path.approximateLength)
         let count = max(2, Int((length / Self.pulseSpacing).rounded()))
         let duration = Double(length) / Self.referenceSpeed
 
-        // Short links keep a visible gap between droplets.
+        // Short links keep a visible gap between comets.
         let pulseLength = min(Self.pulseLength, length / CGFloat(count) * 0.74)
-        let dropletHeight = max(2.2, width * 0.94)
-        pulse.bounds = CGRect(x: 0, y: 0, width: pulseLength, height: dropletHeight)
-        pulse.cornerRadius = dropletHeight / 2
+        let cometHeight = max(2.5, width * 0.96)
+        let cometBounds = CGRect(x: 0, y: 0, width: pulseLength, height: cometHeight)
+        pulse.bounds = cometBounds
+        pulse.cornerRadius = cometHeight / 2
         pulse.opacity = 0
 
         pulses.instanceCount = count
@@ -429,10 +637,10 @@ private final class FlowLinkLayer: CALayer {
         pulse.add(group, forKey: "flow")
     }
 
-    /// Changes the clock rate without moving the droplets.
+    /// Changes the clock rate without moving the comets.
     private func setSpeed(_ speed: Double) {
         let target = Float(speed)
-        guard abs(pulses.speed - target) > Self.speedTolerance else { return }
+        guard abs(pulses.speed - target) / target > 0.06 else { return }
         let now = CACurrentMediaTime()
         let local = pulses.convertTime(now, from: nil)
         pulses.timeOffset = 0
