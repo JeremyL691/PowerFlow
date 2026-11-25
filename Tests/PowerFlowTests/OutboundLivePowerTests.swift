@@ -98,6 +98,70 @@ final class OutboundLivePowerTests: XCTestCase {
         XCTAssertEqual(snap.totalOutboundPowerW, 10.0, accuracy: 0.001)
     }
 
+    func testDuplicatePortIndexEntriesAreDeduplicated() {
+        let lower = makePowerOutEntry(portIndex: 2, wattsMW: 1_000, currentMA: 200, voltageMV: 5_000)
+        let higher = makePowerOutEntry(portIndex: 2, wattsMW: 5_200, currentMA: 1_040, voltageMV: 5_000)
+        let ports = resolveOutbound(
+            powerOut: [lower, higher],
+            live: [:],
+            topology: [makeUSBCTopology(port: 2, name: "Demo Phone")]
+        )
+
+        XCTAssertEqual(ports.count, 1)
+        XCTAssertEqual(ports[0].portIndex, 2)
+        XCTAssertEqual(ports[0].powerW, 5.2, accuracy: 0.001)
+    }
+
+    func testLiveVBUSActiveDipPassesThroughResolveOutboundPorts() {
+        // 0.01A @ 5.0V = 0.05W: below 0.02A but VBUS is active (>= 3.0V), so resolver lets OutboundPortGate decide.
+        let ports = resolveOutbound(
+            powerOut: [],
+            live: [2: SMCPortOutput(currentA: 0.01, voltageV: 5.0)],
+            topology: [makeUSBCTopology(port: 2, name: "Demo Phone")]
+        )
+
+        XCTAssertEqual(ports.count, 1)
+        XCTAssertEqual(ports[0].portIndex, 2)
+        XCTAssertEqual(ports[0].powerW, 0.05, accuracy: 0.001)
+    }
+
+    func testLivePortBriefDipThroughResolverHysteresisDoesNotBlink() {
+        let resolver = makeIsolatedResolver()
+        let topology = [makeUSBCTopology(port: 2, name: "Demo Phone")]
+        let reading = makeReading(isExternalConnected: true, powerOutDetails: [])
+        let t0 = Date(timeIntervalSince1970: 5_000)
+
+        let open = resolver.resolve(
+            reading: reading,
+            smc: SMCPowerSample(deliveryRateW: 25, portOutputs: [2: SMCPortOutput(currentA: 0.5, voltageV: 5.0)]),
+            portTopology: topology,
+            connectionPhase: .onAC,
+            isLowPowerModeEnabled: false,
+            timestamp: t0
+        )
+        XCTAssertEqual(open.outboundPorts.count, 1)
+
+        // Brief 0.06W dip (0.012A @ 5.0V) for 2 seconds must stay open via OutboundPortGate hysteresis.
+        let dip1 = resolver.resolve(
+            reading: reading,
+            smc: SMCPowerSample(deliveryRateW: 25, portOutputs: [2: SMCPortOutput(currentA: 0.012, voltageV: 5.0)]),
+            portTopology: topology,
+            connectionPhase: .onAC,
+            isLowPowerModeEnabled: false,
+            timestamp: t0.addingTimeInterval(1)
+        )
+        let dip2 = resolver.resolve(
+            reading: reading,
+            smc: SMCPowerSample(deliveryRateW: 25, portOutputs: [2: SMCPortOutput(currentA: 0.012, voltageV: 5.0)]),
+            portTopology: topology,
+            connectionPhase: .onAC,
+            isLowPowerModeEnabled: false,
+            timestamp: t0.addingTimeInterval(2)
+        )
+        XCTAssertEqual(dip1.outboundPorts.count, 1)
+        XCTAssertEqual(dip2.outboundPorts.count, 1)
+    }
+
     // MARK: - Helpers
 
     private func resolveOutbound(

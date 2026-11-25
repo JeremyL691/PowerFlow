@@ -19,9 +19,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
     private let popover: NSPopover
 
     private var settingsWindow: NSWindow?
+    private weak var popoverHostingController: NSHostingController<MenuBarPopoverView>?
+    private weak var observedButtonWindow: NSWindow?
 
     private var appearanceObservation: NSKeyValueObservation?
     private var popoverSizeObservation: NSKeyValueObservation?
+    private var appResignActiveObserver: NotificationObserverToken?
     private var buttonWindowMoveObserver: NotificationObserverToken?
     private var buttonWindowScreenObserver: NotificationObserverToken?
     private var screenParametersObserver: NotificationObserverToken?
@@ -32,10 +35,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
     private var lastVisualSignature: VisualSignature?
     private var lastTooltip: String?
     private var lastTargetPopoverSize: NSSize?
+    private var currentPopoverMaxHeight: CGFloat = 800
     private var isPendingPopoverShow = false
     private var isClosingProgrammatically = false
+    private var popoverCloseGeneration: UInt64 = 0
     private var lastExternalCloseUptime: TimeInterval = -.greatestFiniteMagnitude
     private var isInvalidated = false
+
+    var isPopoverShown: Bool {
+        popover.isShown
+    }
 
     init(monitor: PowerMonitor) {
         self.monitor = monitor
@@ -45,10 +54,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
 
         statusItem.autosaveName = Self.statusItemAutosaveName
         // A stored "hidden" flag under this name may outlive the item it was written for.
-        statusItem.isVisible = true
+        if !statusItem.isVisible {
+            statusItem.isVisible = true
+        }
         configurePopover()
         configureStatusButton()
-        observeButtonAppearanceAndPosition()
+        observeButtonAppearance()
         observeMonitorState()
     }
 
@@ -71,14 +82,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
             if existing.isMiniaturized {
                 existing.deminiaturize(nil)
             }
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             existing.makeKeyAndOrderFront(nil)
             return
         }
 
         let window = makeSettingsWindow()
         settingsWindow = window
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -88,22 +99,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
         isPendingPopoverShow = false
 
         removeClickMonitors()
+        removePopoverPresentationObservers()
         appearanceObservation?.invalidate()
         appearanceObservation = nil
         popoverSizeObservation?.invalidate()
         popoverSizeObservation = nil
         lastTargetPopoverSize = nil
-
-        buttonWindowMoveObserver?.invalidate()
-        buttonWindowMoveObserver = nil
-        buttonWindowScreenObserver?.invalidate()
-        buttonWindowScreenObserver = nil
-        screenParametersObserver?.invalidate()
-        screenParametersObserver = nil
+        popoverHostingController = nil
 
         if popover.isShown {
             isClosingProgrammatically = true
-            popover.performClose(nil)
+            popover.animates = false
+            popover.close()
         }
         popover.delegate = nil
         popover.contentViewController = nil
@@ -111,6 +118,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
 
         if let window = settingsWindow {
             window.delegate = nil
+            window.contentViewController = nil
             window.close()
             settingsWindow = nil
         }
@@ -122,19 +130,21 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
 
     private func configurePopover() {
         popover.behavior = .transient
-        popover.animates = true
+        syncPopoverAnimation()
         popover.delegate = self
     }
 
-    /// Built on demand and released on close so a hidden popover never re-renders.
-    private func makePopoverContent() -> NSViewController {
-        popoverSizeObservation?.invalidate()
-        popoverSizeObservation = nil
-        lastTargetPopoverSize = nil
+    private func syncPopoverAnimation() {
+        popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
 
+    private func computePopoverMaxHeight() -> CGFloat {
         let visibleHeight = (statusItem.button?.window?.screen ?? NSScreen.main)?.visibleFrame.height ?? 800
-        let maxHeight = max(360, visibleHeight - 24)
-        let contentView = MenuBarPopoverView(
+        return max(360, visibleHeight - 24)
+    }
+
+    private func makePopoverView(maxHeight: CGFloat) -> MenuBarPopoverView {
+        MenuBarPopoverView(
             monitor: monitor,
             maxHeight: maxHeight,
             openSettings: { [weak self] in
@@ -144,7 +154,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
                 self?.quitApplication()
             }
         )
-        let hostingController = NSHostingController(rootView: contentView)
+    }
+
+    /// Built on demand and released on close so a hidden popover never re-renders.
+    private func makePopoverContent() -> NSViewController {
+        popoverSizeObservation?.invalidate()
+        popoverSizeObservation = nil
+        lastTargetPopoverSize = nil
+
+        let maxHeight = computePopoverMaxHeight()
+        currentPopoverMaxHeight = maxHeight
+        let hostingController = NSHostingController(rootView: makePopoverView(maxHeight: maxHeight))
+        popoverHostingController = hostingController
         hostingController.sizingOptions = .preferredContentSize
         let rawFittingSize = hostingController.sizeThatFits(
             in: NSSize(width: MenuBarPopoverView.width, height: .greatestFiniteMagnitude)
@@ -167,7 +188,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
                 guard preferred.height.isFinite, preferred.height > 1 else { return }
                 let targetSize = NSSize(
                     width: MenuBarPopoverView.width,
-                    height: min(preferred.height, maxHeight)
+                    height: min(preferred.height, self.currentPopoverMaxHeight)
                 )
                 let previous = self.lastTargetPopoverSize ?? self.popover.contentSize
                 guard abs(previous.width - targetSize.width) > 1.0
@@ -177,6 +198,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
                 }
                 self.lastTargetPopoverSize = targetSize
 
+                self.syncPopoverAnimation()
                 if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                     self.popover.contentSize = targetSize
                 } else {
@@ -201,7 +223,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
         button.imageScaling = .scaleNone
     }
 
-    private func observeButtonAppearanceAndPosition() {
+    private func observeButtonAppearance() {
         guard let button = statusItem.button else { return }
 
         appearanceObservation = button.observe(\.effectiveAppearance, options: [.new]) { @Sendable [weak self] _, _ in
@@ -213,6 +235,22 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
                 )
             }
         }
+    }
+
+    private func installPopoverPresentationObservers(for buttonWindow: NSWindow) {
+        removePopoverPresentationObservers()
+
+        appResignActiveObserver = NotificationObserverToken(
+            NotificationCenter.default.addObserver(
+                forName: NSApplication.didResignActiveNotification,
+                object: NSApp,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.closePopover(sender: nil)
+                }
+            }
+        )
 
         screenParametersObserver = NotificationObserverToken(
             NotificationCenter.default.addObserver(
@@ -220,20 +258,19 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.reanchorPopoverIfNeeded()
+                MainActor.assumeIsolated {
+                    self?.reanchorPopoverIfNeeded(updateMaxHeight: true)
                 }
             }
         )
 
-        if let buttonWindow = button.window {
-            attachWindowObservers(to: buttonWindow)
-        }
+        attachWindowObservers(to: buttonWindow)
     }
 
     private func attachWindowObservers(to window: NSWindow) {
         buttonWindowMoveObserver?.invalidate()
         buttonWindowScreenObserver?.invalidate()
+        observedButtonWindow = window
 
         buttonWindowMoveObserver = NotificationObserverToken(
             NotificationCenter.default.addObserver(
@@ -241,8 +278,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
                 object: window,
                 queue: .main
             ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.reanchorPopoverIfNeeded()
+                MainActor.assumeIsolated {
+                    self?.reanchorPopoverIfNeeded(updateMaxHeight: false)
                 }
             }
         )
@@ -253,11 +290,23 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
                 object: window,
                 queue: .main
             ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.reanchorPopoverIfNeeded()
+                MainActor.assumeIsolated {
+                    self?.reanchorPopoverIfNeeded(updateMaxHeight: true)
                 }
             }
         )
+    }
+
+    private func removePopoverPresentationObservers() {
+        appResignActiveObserver?.invalidate()
+        appResignActiveObserver = nil
+        buttonWindowMoveObserver?.invalidate()
+        buttonWindowMoveObserver = nil
+        buttonWindowScreenObserver?.invalidate()
+        buttonWindowScreenObserver = nil
+        screenParametersObserver?.invalidate()
+        screenParametersObserver = nil
+        observedButtonWindow = nil
     }
 
     private func observeMonitorState() {
@@ -284,7 +333,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
     private func updateStatusItem(snapshot: PowerSnapshot, settings: PowerSettings) {
         guard !isInvalidated, let button = statusItem.button else { return }
 
-        if buttonWindowMoveObserver == nil, let buttonWindow = button.window {
+        if popover.isShown, let buttonWindow = button.window, buttonWindow !== observedButtonWindow {
             attachWindowObservers(to: buttonWindow)
         }
 
@@ -363,7 +412,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
         return PowerFormatters.compactWatts(max(0, watts))
     }
 
-    private func makeTooltip(snapshot: PowerSnapshot, settings: PowerSettings) -> String {
+    func makeTooltip(snapshot: PowerSnapshot, settings: PowerSettings) -> String {
+        Self.makeTooltip(snapshot: snapshot, settings: settings)
+    }
+
+    static func makeTooltip(snapshot: PowerSnapshot, settings: PowerSettings) -> String {
         let language = settings.appLanguage
         let appName = L10n.string(.appName, language: language)
         guard snapshot.isDataAvailable else {
@@ -379,7 +432,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
                 ? snapshot.adapterInputPowerW
                 : snapshot.totalSystemLoadW
             if watts > 0.05 {
-                parts.append("\(portLabel) (\(PowerFormatters.watts(watts, decimals: 1)))")
+                parts.append("\(portLabel) (\(PowerFormatters.compactWatts(max(0, watts))))")
             } else {
                 parts.append(portLabel)
             }
@@ -389,7 +442,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
                 : abs(snapshot.batteryPowerW)
             let batteryLabel = L10n.string(.battery, language: language)
             if loadW > 0.05 {
-                parts.append("\(batteryLabel) (\(PowerFormatters.watts(loadW, decimals: 1)))")
+                parts.append("\(batteryLabel) (\(PowerFormatters.compactWatts(max(0, loadW))))")
             } else {
                 parts.append(batteryLabel)
             }
@@ -397,7 +450,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
 
         if snapshot.hasActiveOutboundPower {
             let outLabel = L10n.tr("Out", zh: "输出", language: language)
-            parts.append("\(outLabel): \(PowerFormatters.watts(snapshot.totalOutboundPowerW, decimals: 1))")
+            parts.append("\(outLabel): \(PowerFormatters.compactWatts(max(0, snapshot.totalOutboundPowerW)))")
         }
 
         if snapshot.isLowPowerModeEnabled {
@@ -409,13 +462,25 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
 
     // MARK: - Click & Context Menu Handling
 
+    static func shouldOpenContextMenu(
+        eventType: NSEvent.EventType,
+        modifierFlags: NSEvent.ModifierFlags
+    ) -> Bool {
+        switch eventType {
+        case .rightMouseDown, .rightMouseUp:
+            return true
+        case .leftMouseDown, .leftMouseUp:
+            return modifierFlags.contains(.control)
+        default:
+            return false
+        }
+    }
+
     @objc private func handleStatusItemClick(_ sender: NSStatusBarButton) {
         guard !isInvalidated else { return }
 
         if let event = NSApp.currentEvent,
-           event.type == .rightMouseDown
-            || event.type == .rightMouseUp
-            || event.modifierFlags.contains(.control)
+           Self.shouldOpenContextMenu(eventType: event.type, modifierFlags: event.modifierFlags)
         {
             closePopover(sender: sender)
             showContextMenu(relativeTo: sender)
@@ -433,58 +498,107 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
 
         guard !isPendingPopoverShow else { return }
         isPendingPopoverShow = true
+        NSApp.activate()
 
         // Defer showing popover past the current mouseDown cycle so macOS 15–27
         // does not immediately dismiss the transient popover on the same click.
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.isPendingPopoverShow else { return }
             self.isPendingPopoverShow = false
             self.showPopover()
         }
     }
 
+    private func canAnchorPopover(to button: NSStatusBarButton, in buttonWindow: NSWindow) -> Bool {
+        guard statusItem.isVisible else { return false }
+        guard buttonWindow.occlusionState.contains(.visible) else { return false }
+        let frame = buttonWindow.frame
+        guard frame.width > 0, frame.height > 0 else { return false }
+        guard let screen = buttonWindow.screen else { return false }
+        let intersection = screen.frame.intersection(frame)
+        return !intersection.isNull && intersection.width >= 1 && intersection.height >= 1
+    }
+
     private func showPopover() {
         guard !isInvalidated, !popover.isShown else { return }
-        guard let button = statusItem.button, button.window != nil else { return }
-
-        isClosingProgrammatically = false
-
-        if buttonWindowMoveObserver == nil, let buttonWindow = button.window {
-            attachWindowObservers(to: buttonWindow)
+        guard let button = statusItem.button,
+              let buttonWindow = button.window,
+              canAnchorPopover(to: button, in: buttonWindow)
+        else {
+            return
         }
 
+        isClosingProgrammatically = false
+        syncPopoverAnimation()
+        monitor.setPopoverVisible(true)
+
         popover.contentViewController = makePopoverContent()
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         guard popover.isShown else {
             popoverSizeObservation?.invalidate()
             popoverSizeObservation = nil
             lastTargetPopoverSize = nil
+            popoverHostingController = nil
             popover.contentViewController = nil
+            monitor.setPopoverVisible(false)
             return
         }
         popover.contentViewController?.view.window?.makeKey()
         installClickMonitors()
-        monitor.setPopoverVisible(true)
+        installPopoverPresentationObservers(for: buttonWindow)
     }
 
     private func closePopover(sender: Any?) {
         isPendingPopoverShow = false
-        removeClickMonitors()
-        if popover.isShown {
-            isClosingProgrammatically = true
-            popover.performClose(sender)
+        guard popover.isShown else {
+            removeClickMonitors()
+            removePopoverPresentationObservers()
+            monitor.setPopoverVisible(false)
+            return
         }
-        monitor.setPopoverVisible(false)
+
+        syncPopoverAnimation()
+        let previousGeneration = popoverCloseGeneration
+        isClosingProgrammatically = true
+        popover.performClose(sender)
+        if popoverCloseGeneration == previousGeneration && popover.isShown {
+            isClosingProgrammatically = false
+        }
     }
 
-    private func reanchorPopoverIfNeeded() {
+    private func reanchorPopoverIfNeeded(updateMaxHeight: Bool) {
         guard !isInvalidated, popover.isShown, let button = statusItem.button else { return }
-        guard button.window != nil else {
+        guard let buttonWindow = button.window,
+              canAnchorPopover(to: button, in: buttonWindow)
+        else {
             closePopover(sender: nil)
             return
         }
+        if buttonWindow !== observedButtonWindow {
+            attachWindowObservers(to: buttonWindow)
+        }
+        if updateMaxHeight {
+            updatePopoverMaxHeightIfNeeded()
+        }
         popover.positioningRect = button.bounds
+    }
+
+    private func updatePopoverMaxHeightIfNeeded() {
+        let newMaxHeight = computePopoverMaxHeight()
+        guard abs(newMaxHeight - currentPopoverMaxHeight) > 0.5 else { return }
+        currentPopoverMaxHeight = newMaxHeight
+        guard let hostingController = popoverHostingController else { return }
+        hostingController.rootView = makePopoverView(maxHeight: newMaxHeight)
+        let rawFittingSize = hostingController.sizeThatFits(
+            in: NSSize(width: MenuBarPopoverView.width, height: .greatestFiniteMagnitude)
+        )
+        let targetSize = NSSize(
+            width: MenuBarPopoverView.width,
+            height: min(rawFittingSize.height, newMaxHeight)
+        )
+        lastTargetPopoverSize = targetSize
+        popover.contentSize = targetSize
     }
 
     private func installClickMonitors() {
@@ -588,6 +702,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
         )
         window.title = L10n.tr("PowerFlow Settings", zh: "PowerFlow 设置", language: language)
         window.isReleasedWhenClosed = false
+        window.isRestorable = false
         window.center()
         window.delegate = self
 
@@ -604,6 +719,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
     }
 
     func popoverWillClose(_ notification: Notification) {
+        popoverCloseGeneration &+= 1
         if !isClosingProgrammatically {
             lastExternalCloseUptime = ProcessInfo.processInfo.systemUptime
         }
@@ -615,9 +731,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
         }
         isClosingProgrammatically = false
         removeClickMonitors()
+        removePopoverPresentationObservers()
         popoverSizeObservation?.invalidate()
         popoverSizeObservation = nil
         lastTargetPopoverSize = nil
+        popoverHostingController = nil
         popover.contentViewController = nil
         monitor.setPopoverVisible(false)
     }
@@ -627,7 +745,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
     func windowWillClose(_ notification: Notification) {
         guard let closingWindow = notification.object as? NSWindow else { return }
         if closingWindow === settingsWindow {
-            settingsWindow?.delegate = nil
+            closingWindow.delegate = nil
+            closingWindow.contentViewController = nil
             settingsWindow = nil
         }
     }

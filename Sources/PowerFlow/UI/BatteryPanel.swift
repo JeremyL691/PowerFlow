@@ -33,6 +33,7 @@ struct BatteryPanel: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
                         .lineLimit(1)
+                        .layoutPriority(1)
                     Spacer(minLength: 4)
                     HStack(spacing: 3.5) {
                         if differentiateWithoutColor || health.condition == .serviceRecommended {
@@ -46,7 +47,6 @@ struct BatteryPanel: View {
                             .truncationMode(.tail)
                     }
                     .foregroundStyle(conditionTint)
-                    .fixedSize(horizontal: true, vertical: false)
                 }
                 healthRows
             }

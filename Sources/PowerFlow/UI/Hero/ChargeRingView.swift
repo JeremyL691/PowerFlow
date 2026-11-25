@@ -105,6 +105,11 @@ final class ChargeRingNSView: NSView {
         nil
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        rebuild()
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
@@ -142,7 +147,7 @@ final class ChargeRingNSView: NSView {
         isAnimating newAnimating: Bool,
         reduceMotion newReduceMotion: Bool
     ) {
-        let clampedFraction = min(1.0, max(0.0, newFraction))
+        let clampedFraction = newFraction.isFinite ? min(1.0, max(0.0, newFraction)) : 0
         guard
             !hasApplied
                 || clampedFraction != fraction
@@ -172,13 +177,15 @@ final class ChargeRingNSView: NSView {
     private func rebuild(fractionChangedFrom previous: Double? = nil) {
         guard bounds.width > 0, bounds.height > 0, let tint else { return }
 
-        let resolvedTint = tint.usingColorSpace(.sRGB) ?? tint
         let lw = Self.lineWidth
         let side = min(bounds.width, bounds.height)
         let radius = side / 2 - lw / 2 - 4
+        guard radius > 0 else { return }
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
 
         effectiveAppearance.performAsCurrentDrawingAppearance {
+            let resolvedTint = tint.usingColorSpace(.sRGB) ?? tint
+
             CATransaction.begin()
             CATransaction.setDisableActions(true)
 
@@ -259,11 +266,12 @@ final class ChargeRingNSView: NSView {
     }
 
     private func gradientStartColor(from tint: NSColor) -> NSColor {
+        guard let rgb = tint.usingColorSpace(.sRGB) else { return tint }
         var hue: CGFloat = 0
         var saturation: CGFloat = 0
         var brightness: CGFloat = 0
         var alpha: CGFloat = 0
-        tint.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
+        rgb.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
         let shifted = NSColor(
             calibratedHue: (hue - 0.035 + 1).truncatingRemainder(dividingBy: 1),
             saturation: saturation,
@@ -305,6 +313,7 @@ final class ChargeRingNSView: NSView {
     /// sweep already in flight — only re-target when the entrance is pending or
     /// the fraction actually changed.
     private func configureStrokeAnimation(previous: Double?) {
+        guard window != nil else { return }
         guard entrancePending || previous != nil else { return }
 
         let isEntrance = entrancePending
@@ -332,7 +341,7 @@ final class ChargeRingNSView: NSView {
     }
 
     private func configureComet() {
-        let active = isAnimating && !reduceMotion && direction != .idle && fraction > 0.05
+        let active = window != nil && isAnimating && !reduceMotion && direction != .idle && fraction > 0.05
         let signature = active ? (direction == .discharging ? 3 : 1) : 0
         guard
             signature != cometSignature
@@ -386,7 +395,7 @@ final class ChargeRingNSView: NSView {
         group.duration = 2.4
         group.repeatCount = .infinity
         group.isRemovedOnCompletion = false
-        group.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+        group.preferredFrameRateRange = CAFrameRateRange(minimum: 24, maximum: 60, preferred: 60)
         cometLayer.add(group, forKey: "comet")
     }
 }

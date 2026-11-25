@@ -97,6 +97,8 @@ enum L10n {
         case settingsLanguage
         case settingsStartup
         case settingsLaunchAtLogin
+        case launchAtLoginRequiresApproval
+        case openLoginItemsSettings
         case settingsAbout
         case settingsResetDefaults
 
@@ -237,6 +239,8 @@ enum L10n {
         case .settingsLanguage: return isZh ? "界面语言" : "Interface Language"
         case .settingsStartup: return isZh ? "启动" : "Startup"
         case .settingsLaunchAtLogin: return isZh ? "登录时启动" : "Launch at Login"
+        case .launchAtLoginRequiresApproval: return isZh ? "需在“系统设置 → 登录项”中批准" : "Approval required in System Settings → Login Items"
+        case .openLoginItemsSettings: return isZh ? "打开登录项设置…" : "Open Login Items…"
         case .settingsAbout: return isZh ? "关于" : "About"
         case .settingsResetDefaults: return isZh ? "恢复默认设置" : "Reset to Defaults"
 
@@ -323,7 +327,8 @@ enum L10n {
             return string(.fullyCharged, language: language)
         }
         if lower.contains("limit") {
-            return "\(string(.chargeLimit, language: language)) (\(chargeLimitPercent)%)"
+            let suffix = lower.contains("aldente") ? " · AlDente" : ""
+            return "\(string(.chargeLimit, language: language)) (\(chargeLimitPercent)%\(suffix))"
         }
         if lower.contains("thermal") || lower.contains("temp") {
             return tr("Thermal Hold", zh: "温控暂停充电", language: language)

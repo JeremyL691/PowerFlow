@@ -64,7 +64,7 @@ struct BatteryIconRenderSpec: Equatable, Hashable, Sendable {
 enum NativeBatteryIconRenderer {
     static let canvasSize = BatteryIconDrawing.canvasSize
 
-    private static let cache = BoundedImageCache(maxEntries: 128)
+    @MainActor private static let cache = BoundedImageCache(maxEntries: 128)
 
     /// Low Power Mode wins over the low-battery warning. The warning is the system's own
     /// (`IOPSGetBatteryWarningLevel`), which is never raised while on external power.
@@ -105,6 +105,7 @@ enum NativeBatteryIconRenderer {
         )
     }
 
+    @MainActor
     static func render(spec: BatteryIconRenderSpec) -> NSImage {
         let key = spec.cacheKey
         if let cached = cache.image(for: key) {
@@ -115,22 +116,25 @@ enum NativeBatteryIconRenderer {
         return image
     }
 
+    @MainActor
     static func makeImage(spec: BatteryIconRenderSpec, artwork: SystemBatteryArtwork) -> NSImage {
         let drawing = BatteryIconDrawing(spec: spec, artwork: artwork)
         let image = NSImage(size: canvasSize, flipped: false) { _ in
-            guard let ctx = NSGraphicsContext.current?.cgContext else {
-                return false
+            MainActor.assumeIsolated {
+                guard let ctx = NSGraphicsContext.current?.cgContext else {
+                    return false
+                }
+                drawing.draw(in: ctx)
+                return true
             }
-            drawing.draw(in: ctx)
-            return true
         }
         image.isTemplate = spec.usesTemplateRendering
         return image
     }
 }
 
-private final class BoundedImageCache: @unchecked Sendable {
-    private let lock = NSLock()
+@MainActor
+private final class BoundedImageCache {
     private let maxEntries: Int
     private var storage: [BatteryIconRenderSpec: NSImage] = [:]
     private var insertionOrder: [BatteryIconRenderSpec] = []
@@ -140,14 +144,10 @@ private final class BoundedImageCache: @unchecked Sendable {
     }
 
     func image(for key: BatteryIconRenderSpec) -> NSImage? {
-        lock.lock()
-        defer { lock.unlock() }
-        return storage[key]
+        storage[key]
     }
 
     func store(_ image: NSImage, for key: BatteryIconRenderSpec) {
-        lock.lock()
-        defer { lock.unlock() }
         if storage[key] == nil {
             if insertionOrder.count >= maxEntries, let evicted = insertionOrder.first {
                 insertionOrder.removeFirst()

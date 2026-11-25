@@ -15,37 +15,58 @@ final class SystemChargePolicyReader: @unchecked Sendable {
 
     private static let manualReason = "manualChargeLimit"
 
+    private struct FileModificationStamp: Equatable {
+        let seconds: Int
+        let nanoseconds: Int
+    }
+
     private let url: URL
     private let bootSession: String?
+    private let dataLoader: @Sendable (URL) throws -> Data
     private let lock = NSLock()
-    private var cachedModificationDate: Date?
+    private var cachedModificationStamp: FileModificationStamp?
     private var cachedPolicy: SystemChargePolicy?
 
     init(
         url: URL = URL(fileURLWithPath: "/Library/Preferences/com.apple.powerd.charging.plist"),
-        bootSession: String? = SystemChargePolicyReader.currentBootSession()
+        bootSession: String? = SystemChargePolicyReader.currentBootSession(),
+        dataLoader: @escaping @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) }
     ) {
         self.url = url
         self.bootSession = bootSession
+        self.dataLoader = dataLoader
     }
 
     /// The strictest active policy, re-read only when powerd rewrites the file.
     func currentPolicy() -> SystemChargePolicy? {
         lock.lock()
         defer { lock.unlock() }
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        guard let modified = attributes?[.modificationDate] as? Date else {
-            cachedModificationDate = nil
+        guard let modified = Self.modificationStamp(at: url) else {
+            cachedModificationStamp = nil
             cachedPolicy = nil
             return nil
         }
-        if modified != cachedModificationDate {
-            cachedModificationDate = modified
-            cachedPolicy = (try? Data(contentsOf: url)).flatMap {
-                Self.parse($0, bootSession: bootSession)
+        if modified != cachedModificationStamp {
+            guard let data = try? dataLoader(url) else {
+                return cachedPolicy
             }
+            cachedModificationStamp = modified
+            cachedPolicy = Self.parse(data, bootSession: bootSession)
         }
         return cachedPolicy
+    }
+
+    private static func modificationStamp(at url: URL) -> FileModificationStamp? {
+        var st = stat()
+        let status = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return stat(path, &st)
+        }
+        guard status == 0 else { return nil }
+        return FileModificationStamp(
+            seconds: Int(st.st_mtimespec.tv_sec),
+            nanoseconds: Int(st.st_mtimespec.tv_nsec)
+        )
     }
 
     static func parse(_ data: Data, bootSession: String?) -> SystemChargePolicy? {

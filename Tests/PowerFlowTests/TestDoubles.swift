@@ -21,6 +21,28 @@ final class LockedCounter: @unchecked Sendable {
     }
 }
 
+final class LockedBox<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: Value
+
+    init(_ value: Value) {
+        self._value = value
+    }
+
+    var value: Value {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _value
+        }
+        set {
+            lock.lock()
+            _value = newValue
+            lock.unlock()
+        }
+    }
+}
+
 final class DynamicSmartBatteryReader: SmartBatteryReadingProvider, @unchecked Sendable {
     private let provider: @Sendable () -> SmartBatteryReading?
 
@@ -32,8 +54,8 @@ final class DynamicSmartBatteryReader: SmartBatteryReadingProvider, @unchecked S
         provider()
     }
 
-    func readExternalConnectedFast() -> Bool? {
-        provider()?.isExternalConnected
+    func readSmartBattery(includeCellTopology: Bool, includeHealthDetails: Bool) -> SmartBatteryReading? {
+        provider()
     }
 }
 
@@ -42,6 +64,7 @@ final class MockSmartBatteryReader: SmartBatteryReadingProvider, @unchecked Send
     private var _reading: SmartBatteryReading?
     private var _readCount = 0
     private var _cellTopologyScanCount = 0
+    private var _healthDetailsScanCount = 0
 
     init(reading: SmartBatteryReading?) {
         self._reading = reading
@@ -59,6 +82,12 @@ final class MockSmartBatteryReader: SmartBatteryReadingProvider, @unchecked Send
         return _cellTopologyScanCount
     }
 
+    var healthDetailsScanCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _healthDetailsScanCount
+    }
+
     func setReading(_ reading: SmartBatteryReading?) {
         lock.lock()
         _reading = reading
@@ -69,25 +98,26 @@ final class MockSmartBatteryReader: SmartBatteryReadingProvider, @unchecked Send
         lock.lock()
         _readCount = 0
         _cellTopologyScanCount = 0
+        _healthDetailsScanCount = 0
         lock.unlock()
     }
 
     func readSmartBattery(includeCellTopology: Bool) -> SmartBatteryReading? {
+        readSmartBattery(includeCellTopology: includeCellTopology, includeHealthDetails: true)
+    }
+
+    func readSmartBattery(includeCellTopology: Bool, includeHealthDetails: Bool) -> SmartBatteryReading? {
         lock.lock()
         _readCount += 1
         if includeCellTopology {
             _cellTopologyScanCount += 1
         }
+        if includeHealthDetails {
+            _healthDetailsScanCount += 1
+        }
         let current = _reading
         lock.unlock()
         return current
-    }
-
-    func readExternalConnectedFast() -> Bool? {
-        lock.lock()
-        let connected = _reading?.isExternalConnected
-        lock.unlock()
-        return connected
     }
 }
 
@@ -152,29 +182,48 @@ final class MockPowerEventNotifier: PowerEventNotifying, @unchecked Sendable {
 
 /// Keeps values in memory so tests never leave preference files behind.
 final class InMemoryUserDefaults: UserDefaults, @unchecked Sendable {
+    private let lock = NSLock()
     private var storage: [String: Any] = [:]
+    private var _writeCount = 0
+
+    var writeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _writeCount
+    }
 
     init() {
         super.init(suiteName: nil)!
     }
 
     override func object(forKey defaultName: String) -> Any? {
-        storage[defaultName]
+        lock.lock()
+        defer { lock.unlock() }
+        return storage[defaultName]
     }
 
     override func data(forKey defaultName: String) -> Data? {
-        storage[defaultName] as? Data
+        lock.lock()
+        defer { lock.unlock() }
+        return storage[defaultName] as? Data
     }
 
     override func string(forKey defaultName: String) -> String? {
-        storage[defaultName] as? String
+        lock.lock()
+        defer { lock.unlock() }
+        return storage[defaultName] as? String
     }
 
     override func set(_ value: Any?, forKey defaultName: String) {
+        lock.lock()
         storage[defaultName] = value
+        _writeCount += 1
+        lock.unlock()
     }
 
     override func removeObject(forKey defaultName: String) {
+        lock.lock()
         storage[defaultName] = nil
+        lock.unlock()
     }
 }

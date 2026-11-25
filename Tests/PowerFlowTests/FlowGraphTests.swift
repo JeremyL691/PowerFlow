@@ -193,4 +193,29 @@ final class FlowGraphTests: XCTestCase {
         XCTAssertGreaterThan(FlowDynamics.lineWidth(for: 60), FlowDynamics.lineWidth(for: 5))
         XCTAssertLessThanOrEqual(FlowDynamics.lineWidth(for: 400), 8)
     }
+
+    func testUnplugDebounceDoesNotShowSplitBrainAdapterAndBattery() {
+        // During the 1.5s unplug debounce, connectionPhase is still .onAC while isExternalConnected is false.
+        let snapshot = PowerSnapshot(
+            isDataAvailable: true,
+            connectionPhase: .onAC,
+            flowMode: .batteryOnly,
+            batteryPercent: 75,
+            isExternalConnected: false,
+            isCharging: false,
+            batteryCurrentA: -1.2,
+            batteryVoltageV: 12.0,
+            batteryPowerW: -14.4,
+            totalSystemLoadW: 14.4,
+            netSystemLoadW: 14.4,
+            adapterInputPowerW: 0
+        )
+        XCTAssertFalse(snapshot.isEffectivelyOnAC)
+        XCTAssertFalse(snapshot.isAdapterSupplyingPower)
+
+        let graph = FlowGraph(snapshot: snapshot, language: .english)
+        XCTAssertEqual(graph.sources.map(\.id), [FlowGraph.batteryID])
+        XCTAssertEqual(direction(graph, FlowGraph.batteryID), "battery>mac")
+        XCTAssertNil(graph.links.first { $0.id == FlowGraph.adapterID })
+    }
 }

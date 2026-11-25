@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Observation
 
@@ -7,6 +8,8 @@ final class PowerMonitor {
     static let summaryRefreshInterval: TimeInterval = 3.0
     static let summaryTimerLeewayMilliseconds: Int = 500
     static let liveTimerLeewayMilliseconds: Int = 100
+    nonisolated static let portTopologyRefreshInterval: TimeInterval = 30.0
+    static let wakeRefreshCoalesceWindow: TimeInterval = 1.0
     /// Coalesced follow-up refresh offsets after plug/unplug events so AC handshake (3.0s)
     /// and unplug debounce (1.5s) converge smoothly even in zero-polling dormant mode.
     static let plugEventBurstOffsets: [TimeInterval] = [0.2, 0.8, 2.0, 3.2]
@@ -25,6 +28,8 @@ final class PowerMonitor {
     @ObservationIgnored private let clock: @Sendable () -> Date
     @ObservationIgnored private let lowPowerModeProvider: @Sendable () -> Bool
     @ObservationIgnored private let thermalStateProvider: @Sendable () -> ProcessInfo.ThermalState
+    @ObservationIgnored private let isDisplayAsleepProvider: @Sendable () -> Bool
+    @ObservationIgnored private let uptimeProvider: @Sendable () -> TimeInterval
 
     @ObservationIgnored private let telemetryQueue = DispatchQueue(
         label: "com.powerflow.monitor.telemetry",
@@ -35,6 +40,8 @@ final class PowerMonitor {
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isSystemAsleep = false
     @ObservationIgnored private var isScreenAsleep = false
+    @ObservationIgnored private var needsPostWakeFullScan = false
+    @ObservationIgnored private var lastWakeRefreshUptime: TimeInterval = -.greatestFiniteMagnitude
 
     @ObservationIgnored private var timer: DispatchSourceTimer?
     @ObservationIgnored private var burstWorkItems: [DispatchWorkItem] = []
@@ -45,7 +52,7 @@ final class PowerMonitor {
     }
 
     var hasPendingBurstRefreshes: Bool {
-        ProcessInfo.processInfo.systemUptime < burstEndUptime
+        uptimeProvider() < burstEndUptime
     }
 
     init(
@@ -57,7 +64,9 @@ final class PowerMonitor {
         resolver: PowerFlowResolver = PowerFlowResolver(),
         clock: @escaping @Sendable () -> Date = Date.init,
         lowPowerModeProvider: @escaping @Sendable () -> Bool = { ProcessInfo.processInfo.isLowPowerModeEnabled },
-        thermalStateProvider: @escaping @Sendable () -> ProcessInfo.ThermalState = { ProcessInfo.processInfo.thermalState }
+        thermalStateProvider: @escaping @Sendable () -> ProcessInfo.ThermalState = { ProcessInfo.processInfo.thermalState },
+        isDisplayAsleepProvider: @escaping @Sendable () -> Bool = { CGDisplayIsAsleep(CGMainDisplayID()) != 0 },
+        uptimeProvider: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) {
         self.settingsStore = settingsStore
         self.smartBatteryReader = smartBatteryReader
@@ -68,6 +77,8 @@ final class PowerMonitor {
         self.clock = clock
         self.lowPowerModeProvider = lowPowerModeProvider
         self.thermalStateProvider = thermalStateProvider
+        self.isDisplayAsleepProvider = isDisplayAsleepProvider
+        self.uptimeProvider = uptimeProvider
 
         let existingOnChange = settingsStore.onChange
         settingsStore.onChange = { [weak self] newSettings in
@@ -80,9 +91,11 @@ final class PowerMonitor {
 
     func start() {
         guard !isStarted else { return }
+        BatteryChargeLimitResolver.startMonitoringExternalLimiters()
         isStarted = true
         isSystemAsleep = false
-        isScreenAsleep = false
+        isScreenAsleep = isDisplayAsleepProvider()
+        needsPostWakeFullScan = isScreenAsleep
 
         notifier.start { [weak self] event in
             Task { @MainActor [weak self] in
@@ -107,8 +120,10 @@ final class PowerMonitor {
         let uiVisible = isPopoverVisible
         scheduleAsyncSample(
             includeCellTopology: uiVisible,
+            includeHealthDetails: uiVisible,
             includePortTopology: uiVisible,
             fullSMC: uiVisible,
+            includeChargeLimit: uiVisible,
             restartBurstsOnPlugChange: false
         )
     }
@@ -124,11 +139,21 @@ final class PowerMonitor {
         smartBatteryReader: any SmartBatteryReadingProvider = SmartBatteryReader(),
         ioPortReader: any IOPortReadingProvider = IOPortPowerReader(),
         smcReader: SMCReader = SMCReader(),
-        resolver: PowerFlowResolver = PowerFlowResolver(),
+        resolver: PowerFlowResolver = PowerFlowResolver(
+            polarityCalibrator: SMCPolarityCalibrator(userDefaults: nil)
+        ),
         isLowPowerModeEnabled: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled,
         timestamp: Date = Date()
     ) -> PowerSnapshot {
-        let reading = smartBatteryReader.readSmartBattery(includeCellTopology: true)
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                BatteryChargeLimitResolver.startMonitoringExternalLimiters()
+            }
+        }
+        let reading = smartBatteryReader.readSmartBattery(
+            includeCellTopology: true,
+            includeHealthDetails: true
+        )
         let smc = smcReader.readSample(full: true)
         let topology = ioPortReader.readPortTopology()
         let phase: PowerConnectionPhase = (reading?.isExternalConnected == true) ? .onAC : .onBattery
@@ -139,7 +164,10 @@ final class PowerMonitor {
             portTopology: topology,
             connectionPhase: phase,
             isLowPowerModeEnabled: isLowPowerModeEnabled,
-            timestamp: timestamp
+            timestamp: timestamp,
+            isInTransition: false,
+            includeChargeLimit: true,
+            hasLivePortOutputs: true
         )
     }
 
@@ -184,8 +212,10 @@ final class PowerMonitor {
             // transition (not routine 1% SoC / TimeRemaining IOPS notifications).
             scheduleAsyncSample(
                 includeCellTopology: uiVisible,
+                includeHealthDetails: uiVisible,
                 includePortTopology: uiVisible,
                 fullSMC: uiVisible,
+                includeChargeLimit: uiVisible,
                 restartBurstsOnPlugChange: true
             )
 
@@ -194,8 +224,10 @@ final class PowerMonitor {
             let uiVisible = isPopoverVisible
             scheduleAsyncSample(
                 includeCellTopology: uiVisible,
+                includeHealthDetails: uiVisible,
                 includePortTopology: uiVisible,
                 fullSMC: uiVisible,
+                includeChargeLimit: uiVisible,
                 restartBurstsOnPlugChange: false
             )
 
@@ -213,14 +245,31 @@ final class PowerMonitor {
 
         case .systemDidWake:
             isSystemAsleep = false
-            isScreenAsleep = false
-            // Power may have changed hours ago; debouncing against the pre-sleep state is meaningless.
+            isScreenAsleep = isDisplayAsleepProvider()
+            // Power and sensor discovery state may have changed during sleep.
             workerState.resetConnectionPhase()
-            reconfigureScheduling(triggerImmediateRefresh: true, forcePortScanOnImmediate: true)
+            resolver.resetEstimator()
+            smcReader.resetDiscoveryCaches()
+            if isScreenAsleep {
+                needsPostWakeFullScan = true
+                reconfigureScheduling(triggerImmediateRefresh: false, forcePortScanOnImmediate: false)
+            } else {
+                needsPostWakeFullScan = false
+                lastWakeRefreshUptime = uptimeProvider()
+                reconfigureScheduling(triggerImmediateRefresh: true, forcePortScanOnImmediate: true)
+            }
 
         case .screensDidWake:
+            let wasScreenAsleep = isScreenAsleep
             isScreenAsleep = false
-            reconfigureScheduling(triggerImmediateRefresh: true, forcePortScanOnImmediate: isPopoverVisible)
+            let recentlyRefreshedOnWake = !wasScreenAsleep
+                && (uptimeProvider() - lastWakeRefreshUptime) < Self.wakeRefreshCoalesceWindow
+            let shouldRefresh = !recentlyRefreshedOnWake
+            let forceFullScan = needsPostWakeFullScan || isPopoverVisible
+            if shouldRefresh {
+                needsPostWakeFullScan = false
+            }
+            reconfigureScheduling(triggerImmediateRefresh: shouldRefresh, forcePortScanOnImmediate: forceFullScan)
         }
     }
 
@@ -255,8 +304,10 @@ final class PowerMonitor {
                 if previousTier.includesFullHardwareScan && !triggerImmediateRefresh {
                     scheduleAsyncSample(
                         includeCellTopology: false,
+                        includeHealthDetails: false,
                         includePortTopology: false,
                         fullSMC: false,
+                        includeChargeLimit: false,
                         restartBurstsOnPlugChange: true
                     )
                 }
@@ -278,11 +329,13 @@ final class PowerMonitor {
 
         if triggerImmediateRefresh && newTier != .suspended {
             let uiVisible = isPopoverVisible
-            let includePorts = forcePortScanOnImmediate || uiVisible
+            let includeDetails = uiVisible || forcePortScanOnImmediate
             scheduleAsyncSample(
                 includeCellTopology: uiVisible,
-                includePortTopology: includePorts,
-                fullSMC: includePorts,
+                includeHealthDetails: includeDetails,
+                includePortTopology: includeDetails,
+                fullSMC: includeDetails,
+                includeChargeLimit: includeDetails,
                 restartBurstsOnPlugChange: false
             )
         }
@@ -298,8 +351,10 @@ final class PowerMonitor {
         let intervalMs = max(100, Int((interval * 1000.0).rounded()))
         let handler = makeSampleClosure(
             includeCellTopology: fullHardwareScan,
+            includeHealthDetails: fullHardwareScan,
             includePortTopology: fullHardwareScan,
             fullSMC: fullHardwareScan,
+            includeChargeLimit: fullHardwareScan,
             restartBurstsOnPlugChange: false
         )
         timer = Self.makeTelemetryTimer(
@@ -320,14 +375,16 @@ final class PowerMonitor {
     private func schedulePlugEventBursts() {
         cancelBurstRefreshes()
         guard isStarted, !isSystemAsleep, !isScreenAsleep else { return }
-        burstEndUptime = ProcessInfo.processInfo.systemUptime + (Self.plugEventBurstOffsets.last ?? 0)
+        burstEndUptime = uptimeProvider() + (Self.plugEventBurstOffsets.last ?? 0)
         let includeCells = isPopoverVisible
 
         for offset in Self.plugEventBurstOffsets {
             let handler = makeSampleClosure(
                 includeCellTopology: includeCells,
+                includeHealthDetails: includeCells,
                 includePortTopology: true,
                 fullSMC: true,
+                includeChargeLimit: includeCells,
                 restartBurstsOnPlugChange: false
             )
             let item = Self.makeTelemetryWorkItem(handler: handler)
@@ -346,14 +403,18 @@ final class PowerMonitor {
 
     private func scheduleAsyncSample(
         includeCellTopology: Bool,
+        includeHealthDetails: Bool,
         includePortTopology: Bool,
         fullSMC: Bool,
+        includeChargeLimit: Bool,
         restartBurstsOnPlugChange: Bool
     ) {
         let handler = makeSampleClosure(
             includeCellTopology: includeCellTopology,
+            includeHealthDetails: includeHealthDetails,
             includePortTopology: includePortTopology,
             fullSMC: fullSMC,
+            includeChargeLimit: includeChargeLimit,
             restartBurstsOnPlugChange: restartBurstsOnPlugChange
         )
         Self.enqueueTelemetryWork(on: telemetryQueue, handler: handler)
@@ -363,15 +424,19 @@ final class PowerMonitor {
 
     private nonisolated func makeSampleClosure(
         includeCellTopology: Bool,
+        includeHealthDetails: Bool,
         includePortTopology: Bool,
         fullSMC: Bool,
+        includeChargeLimit: Bool,
         restartBurstsOnPlugChange: Bool
     ) -> @Sendable () -> Void {
         { [weak self] in
             self?.performSampleOnTelemetryQueue(
                 includeCellTopology: includeCellTopology,
+                includeHealthDetails: includeHealthDetails,
                 includePortTopology: includePortTopology,
                 fullSMC: fullSMC,
+                includeChargeLimit: includeChargeLimit,
                 restartBurstsOnPlugChange: restartBurstsOnPlugChange
             )
         }
@@ -417,12 +482,17 @@ final class PowerMonitor {
 
     private nonisolated func performSampleOnTelemetryQueue(
         includeCellTopology: Bool,
+        includeHealthDetails: Bool,
         includePortTopology: Bool,
         fullSMC: Bool,
+        includeChargeLimit: Bool,
         restartBurstsOnPlugChange: Bool
     ) {
         let now = clock()
-        let reading = smartBatteryReader.readSmartBattery(includeCellTopology: includeCellTopology)
+        let reading = smartBatteryReader.readSmartBattery(
+            includeCellTopology: includeCellTopology,
+            includeHealthDetails: includeHealthDetails
+        )
         let smc = smcReader.readSample(full: fullSMC)
         let lowPower = lowPowerModeProvider()
 
@@ -440,10 +510,18 @@ final class PowerMonitor {
                 hasValidACTelemetry: hasValidACTelemetry,
                 now: now
             )
+            let periodicOrAdapterRefresh = workerState.evaluatePortTopologyRefresh(
+                reading: reading,
+                now: now,
+                refreshInterval: Self.portTopologyRefreshInterval
+            )
             phase = eval.phase
-            shouldScanPorts = includePortTopology || eval.externalConnectedChanged || eval.isInTransition
-            plugChanged = restartBurstsOnPlugChange && eval.externalConnectedChanged
             isInTransition = eval.isInTransition
+            shouldScanPorts = includePortTopology
+                || eval.externalConnectedChanged
+                || eval.isInTransition
+                || periodicOrAdapterRefresh
+            plugChanged = eval.externalConnectedChanged && (restartBurstsOnPlugChange || isInTransition)
         } else {
             workerState.resetConnectionPhase()
             phase = .onBattery
@@ -455,7 +533,7 @@ final class PowerMonitor {
         let topology: [IOPortTopologyEntry]
         if shouldScanPorts {
             let scanned = ioPortReader.readPortTopology()
-            workerState.setCachedPortTopology(scanned)
+            workerState.setCachedPortTopology(scanned, at: now)
             topology = scanned
         } else {
             topology = workerState.cachedPortTopology()
@@ -468,7 +546,10 @@ final class PowerMonitor {
             connectionPhase: phase,
             isLowPowerModeEnabled: lowPower,
             thermalState: thermalStateProvider(),
-            timestamp: now
+            timestamp: now,
+            isInTransition: isInTransition,
+            includeChargeLimit: includeChargeLimit,
+            hasLivePortOutputs: fullSMC
         )
 
         Task { @MainActor [weak self] in
@@ -490,10 +571,26 @@ final class PowerMonitor {
             let isInTransition: Bool
         }
 
+        private struct AdapterTopologyFingerprint: Equatable, Sendable {
+            let activeAdapterID: Int?
+            let activeWatts: Double?
+            let rawAdapterCount: Int
+            let outboundPortIndices: [Int]
+
+            init(reading: SmartBatteryReading) {
+                self.activeAdapterID = reading.activeAdapter?.adapterID
+                self.activeWatts = reading.activeAdapter?.watts
+                self.rawAdapterCount = reading.rawAdapters.count
+                self.outboundPortIndices = reading.powerOutDetails.map(\.portIndex).sorted()
+            }
+        }
+
         private let lock = NSLock()
         private var connectionMachine = PowerConnectionStateMachine()
         private var lastExternalConnected: Bool?
         private var portTopologyCache: [IOPortTopologyEntry] = []
+        private var lastPortTopologyScanDate: Date?
+        private var lastAdapterFingerprint: AdapterTopologyFingerprint?
 
         func advanceConnectionPhase(
             isExternalConnected: Bool,
@@ -516,16 +613,40 @@ final class PowerMonitor {
             )
         }
 
+        func evaluatePortTopologyRefresh(
+            reading: SmartBatteryReading,
+            now: Date,
+            refreshInterval: TimeInterval
+        ) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            let fingerprint = AdapterTopologyFingerprint(reading: reading)
+            let adapterChanged = lastAdapterFingerprint != nil && lastAdapterFingerprint != fingerprint
+            lastAdapterFingerprint = fingerprint
+
+            let isStale: Bool
+            if let lastScan = lastPortTopologyScanDate {
+                let elapsed = now.timeIntervalSince(lastScan)
+                isStale = elapsed >= refreshInterval || elapsed < 0
+            } else {
+                isStale = true
+            }
+            return adapterChanged || isStale
+        }
+
         func resetConnectionPhase() {
             lock.lock()
             defer { lock.unlock() }
             connectionMachine.reset()
             lastExternalConnected = nil
+            lastPortTopologyScanDate = nil
+            lastAdapterFingerprint = nil
         }
 
-        func setCachedPortTopology(_ entries: [IOPortTopologyEntry]) {
+        func setCachedPortTopology(_ entries: [IOPortTopologyEntry], at now: Date) {
             lock.lock()
             portTopologyCache = entries
+            lastPortTopologyScanDate = now
             lock.unlock()
         }
 

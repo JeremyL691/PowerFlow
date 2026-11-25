@@ -13,14 +13,27 @@ extension PowerFlowResolver {
     ) -> [OutboundPortPower] {
         var results: [OutboundPortPower] = []
         var handledPorts = Set<Int>()
+        var deduplicatedEntries: [Int: RawPowerOutEntry] = [:]
 
         for entry in powerOutDetails {
-            handledPorts.insert(entry.portIndex)
-            let live = liveOutputs[entry.portIndex]
+            if let existing = deduplicatedEntries[entry.portIndex] {
+                if entry.wattsMW > existing.wattsMW
+                    || (entry.wattsMW == existing.wattsMW && entry.currentMA > existing.currentMA)
+                {
+                    deduplicatedEntries[entry.portIndex] = entry
+                }
+            } else {
+                deduplicatedEntries[entry.portIndex] = entry
+            }
+        }
+
+        for (portIndex, entry) in deduplicatedEntries.sorted(by: { $0.key < $1.key }) {
+            handledPorts.insert(portIndex)
+            let live = liveOutputs[portIndex]
             if let live, isLiveOff(live) { continue }
 
             if let port = makeOutboundPort(
-                portIndex: entry.portIndex,
+                portIndex: portIndex,
                 entry: entry,
                 live: live,
                 fedDetails: fedDetails,
@@ -31,8 +44,10 @@ extension PowerFlowResolver {
         }
 
         // Devices plugged in less than a minute ago have live output but no IOKit entry yet.
+        // Pass any VBUS-active port (voltageV >= 3.0) through to OutboundPortGate so brief
+        // 0.04–0.09 W dips are governed by gate hysteresis instead of being dropped early.
         for (portIndex, live) in liveOutputs.sorted(by: { $0.key < $1.key }) where !handledPorts.contains(portIndex) {
-            guard live.currentA >= 0.02, live.voltageV >= 3.0 else { continue }
+            guard live.voltageV >= 3.0 else { continue }
             let hasUSBCPort = portTopology.isEmpty
                 || portTopology.contains { $0.portKind == .usbC && $0.portNumber == portIndex }
             guard hasUSBCPort else { continue }
@@ -77,8 +92,9 @@ extension PowerFlowResolver {
             return computed > 0.01 ? computed : 0
         }()
 
-        // Skip inactive / disconnected entries drawing zero power.
-        guard powerW > 0.01 || currentA > 0.005 || vconnPowerW > 0.01 else {
+        let isLiveVBUSActive = live.map { $0.voltageV >= 3.0 } ?? false
+        // Skip inactive / disconnected entries drawing zero power unless live VBUS is still up.
+        guard isLiveVBUSActive || powerW > 0.01 || currentA > 0.005 || vconnPowerW > 0.01 else {
             return nil
         }
 

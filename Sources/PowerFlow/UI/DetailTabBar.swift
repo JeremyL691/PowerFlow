@@ -16,20 +16,21 @@ struct DetailTabBar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @Binding var selection: PopoverDetailTab
-    let snapshot: PowerSnapshot
+    let isOnAC: Bool
+    let ratedAdapterWatts: Double
+    let outboundPortCount: Int
     let language: AppLanguage
 
     @Namespace private var namespace
     @State private var hoveredTab: PopoverDetailTab?
 
     private var chargerBadge: String? {
-        let rated = snapshot.activeAdapter?.ratedWatts ?? 0
-        guard snapshot.isEffectivelyOnAC, rated > 0.5 else { return nil }
-        return "\(Int(rated.rounded())) W"
+        guard isOnAC, ratedAdapterWatts.isFinite, ratedAdapterWatts > 0.5 else { return nil }
+        return "\(Int(ratedAdapterWatts.rounded())) W"
     }
 
     private var outputBadge: String? {
-        snapshot.outboundPorts.isEmpty ? nil : "\(snapshot.outboundPorts.count)"
+        outboundPortCount == 0 ? nil : "\(outboundPortCount)"
     }
 
     private func badge(for tab: PopoverDetailTab) -> String? {

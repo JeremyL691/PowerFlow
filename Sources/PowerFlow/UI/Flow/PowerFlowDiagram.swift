@@ -74,7 +74,7 @@ struct PowerFlowDiagram: View {
 
     private var modeTint: Color? {
         guard snapshot.flowMode != .unknown else { return nil }
-        if snapshot.isLowBatteryWarning {
+        if !snapshot.isEffectivelyOnAC && (snapshot.isLowBatteryWarning || snapshot.atCriticalLevel) {
             return PowerFlowTheme.warningRed(for: colorScheme, contrast: colorSchemeContrast)
         }
         return PowerFlowTheme.themeBlue(for: colorScheme, contrast: colorSchemeContrast)
@@ -199,7 +199,8 @@ struct PowerFlowDiagram: View {
 
     private func accessibilitySummary(_ graph: FlowGraph) -> String {
         let names = Dictionary(
-            uniqueKeysWithValues: ([graph.mac] + graph.sources + graph.outputs).map { ($0.id, $0.title) }
+            ([graph.mac] + graph.sources + graph.outputs).map { ($0.id, $0.title) },
+            uniquingKeysWith: { first, _ in first }
         )
         let flows = graph.links.filter(\.isActive).map { link in
             "\(names[link.from] ?? "") → \(names[link.to] ?? "") \(PowerFormatters.watts(link.watts, decimals: 1))"
@@ -282,14 +283,14 @@ private struct FlowNodeView: View {
                         ? Color.white.opacity(0.065)
                         : Color.white.opacity(0.85)
                 )
+                .shadow(
+                    color: Color.black.opacity(colorScheme == .dark ? 0 : 0.06),
+                    radius: 6,
+                    x: 0,
+                    y: 2
+                )
         }
         .overlay { capsuleStroke }
-        .shadow(
-            color: Color.black.opacity(colorScheme == .dark ? 0 : 0.06),
-            radius: 6,
-            x: 0,
-            y: 2
-        )
     }
 
     @ViewBuilder

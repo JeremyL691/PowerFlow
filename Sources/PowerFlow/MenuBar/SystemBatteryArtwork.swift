@@ -2,8 +2,9 @@ import AppKit
 
 /// Glyphs used by the menu bar battery, loaded from the running system's own Control Center
 /// so they always match the installed macOS release. Nothing is bundled with PowerFlow.
+@MainActor
 struct SystemBatteryArtwork {
-    enum Piece: String, CaseIterable {
+    enum Piece: String, CaseIterable, Sendable {
         case cap = "battery-cap"
         case missing = "battery-missing"
         case bolt = "battery-bolt"
@@ -26,7 +27,7 @@ struct SystemBatteryArtwork {
         load(piece)
     }
 
-    nonisolated(unsafe) static let system: SystemBatteryArtwork = {
+    static let system: SystemBatteryArtwork = {
         let bundle = Bundle(path: "/System/Library/CoreServices/ControlCenter.app")
         var images: [Piece: NSImage] = [:]
         for piece in Piece.allCases {
@@ -37,5 +38,5 @@ struct SystemBatteryArtwork {
     }()
 
     /// Used when the system artwork is missing; every glyph falls back to SF Symbols.
-    nonisolated(unsafe) static let unavailable = SystemBatteryArtwork { _ in nil }
+    static let unavailable = SystemBatteryArtwork { _ in nil }
 }

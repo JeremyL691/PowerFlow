@@ -2,6 +2,7 @@ import Foundation
 
 enum PowerFormatters {
     private static let posixLocale = Locale(identifier: "en_US_POSIX")
+    private static let maxSafeIntDouble = Double(Int.max).nextDown
 
     private static func normalizeZero(_ value: Double, decimals: Int) -> Double {
         let threshold = pow(10.0, -Double(decimals)) * 0.5
@@ -35,7 +36,8 @@ enum PowerFormatters {
         if magnitude < 10.0 {
             return String(format: "%.1fW", locale: posixLocale, magnitude)
         }
-        return "\(Int(magnitude.rounded()))W"
+        let clamped = min(magnitude.rounded(), maxSafeIntDouble)
+        return "\(Int(clamped))W"
     }
 
     static func wattHours(_ wh: Double?, decimals: Int = 1) -> String {
@@ -67,7 +69,8 @@ enum PowerFormatters {
 
     static func rpm(_ rpm: Double) -> String {
         guard rpm.isFinite, rpm >= 0 else { return "—" }
-        return "\(integerGrouped(Int(rpm.rounded()))) RPM"
+        let clamped = min(rpm.rounded(), maxSafeIntDouble)
+        return "\(integerGrouped(Int(clamped))) RPM"
     }
 
     static func capacityMAh(_ value: Int?) -> String {
@@ -150,7 +153,7 @@ enum PowerFormatters {
 
     static func integerGrouped(_ value: Int) -> String {
         let isNegative = value < 0
-        let digits = String(abs(value))
+        let digits = String(value.magnitude)
         var result = ""
         result.reserveCapacity(digits.count + digits.count / 3 + 1)
         for (index, char) in digits.reversed().enumerated() {

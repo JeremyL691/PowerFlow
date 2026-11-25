@@ -10,10 +10,16 @@ enum SMCBatteryPowerPolarity: String, Sendable, Equatable, Codable {
 
 /// Thread-safe auto-calibrator for SMC `PPBR` sign convention, optionally persisted per Mac model.
 final class SMCPolarityCalibrator: @unchecked Sendable {
+    static let requiredFlipConfirmations = 3
+
     private let lock = NSLock()
     private let userDefaults: UserDefaults?
     private let storageKey: String
     private var cachedPolarity: SMCBatteryPowerPolarity?
+    private var pendingFlipPolarity: SMCBatteryPowerPolarity?
+    private var pendingFlipCount = 0
+    private var sessionSteadyStatePolarities: Set<SMCBatteryPowerPolarity> = []
+    private var isUnsignedPPBRDetected = false
 
     init(
         userDefaults: UserDefaults? = .standard,
@@ -37,12 +43,19 @@ final class SMCPolarityCalibrator: @unchecked Sendable {
         return cachedPolarity
     }
 
+    var isUnsignedMagnitudeDetected: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isUnsignedPPBRDetected
+    }
+
     /// Calibrates and normalizes `PPBR` into the unified sign convention:
     /// `> 0` charging, `< 0` discharging.
     func normalizeBatteryPower(
         rawPPBR: Double,
         isExternalConnected: Bool,
-        isCharging: Bool
+        isCharging: Bool,
+        allowCalibration: Bool = true
     ) -> Double {
         guard rawPPBR.isFinite else { return 0 }
 
@@ -50,7 +63,7 @@ final class SMCPolarityCalibrator: @unchecked Sendable {
         defer { lock.unlock() }
 
         let magnitude = abs(rawPPBR)
-        if magnitude >= 2.0 {
+        if allowCalibration, magnitude >= 2.0 {
             var observed: SMCBatteryPowerPolarity?
             if !isExternalConnected {
                 // Unplugged battery can only discharge.
@@ -60,14 +73,65 @@ final class SMCPolarityCalibrator: @unchecked Sendable {
                 observed = rawPPBR > 0 ? .normal : .inverted
             }
 
-            if let observed, observed != cachedPolarity {
-                cachedPolarity = observed
-                userDefaults?.set(observed.rawValue, forKey: storageKey)
+            if let observed {
+                if isUnsignedPPBRDetected {
+                    pendingFlipPolarity = nil
+                    pendingFlipCount = 0
+                } else if cachedPolarity == nil {
+                    cachedPolarity = observed
+                    sessionSteadyStatePolarities.insert(observed)
+                    pendingFlipPolarity = nil
+                    pendingFlipCount = 0
+                    userDefaults?.set(observed.rawValue, forKey: storageKey)
+                } else if observed == cachedPolarity {
+                    sessionSteadyStatePolarities.insert(observed)
+                    pendingFlipPolarity = nil
+                    pendingFlipCount = 0
+                } else {
+                    if pendingFlipPolarity == observed {
+                        pendingFlipCount += 1
+                    } else {
+                        pendingFlipPolarity = observed
+                        pendingFlipCount = 1
+                    }
+
+                    if pendingFlipCount >= Self.requiredFlipConfirmations {
+                        pendingFlipPolarity = nil
+                        pendingFlipCount = 0
+                        sessionSteadyStatePolarities.insert(observed)
+                        if sessionSteadyStatePolarities.count > 1 {
+                            // Opposite polarities confirmed in steady state within one session:
+                            // hardware reports unsigned magnitude. Stop persisting polarity flips.
+                            isUnsignedPPBRDetected = true
+                        } else {
+                            cachedPolarity = observed
+                            userDefaults?.set(observed.rawValue, forKey: storageKey)
+                        }
+                    }
+                }
+            } else {
+                pendingFlipPolarity = nil
+                pendingFlipCount = 0
             }
+        } else {
+            pendingFlipPolarity = nil
+            pendingFlipCount = 0
         }
 
-        let effectivePolarity = cachedPolarity ?? .normal
-        let normalized = effectivePolarity == .inverted ? -rawPPBR : rawPPBR
+        let normalized: Double
+        if isUnsignedPPBRDetected {
+            if !isExternalConnected {
+                normalized = -magnitude
+            } else if isCharging {
+                normalized = magnitude
+            } else {
+                let effectivePolarity = cachedPolarity ?? .normal
+                normalized = effectivePolarity == .inverted ? -rawPPBR : rawPPBR
+            }
+        } else {
+            let effectivePolarity = cachedPolarity ?? .normal
+            normalized = effectivePolarity == .inverted ? -rawPPBR : rawPPBR
+        }
         return abs(normalized) < 0.05 ? 0 : normalized
     }
 

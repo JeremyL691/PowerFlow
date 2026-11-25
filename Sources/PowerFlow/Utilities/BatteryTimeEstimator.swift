@@ -3,12 +3,15 @@ import Foundation
 /// Smooths battery time-to-empty / time-to-full estimates using an exponential moving average (EMA)
 /// on current draw and a Constant-Voltage (CV) taper model above 80% SoC when charging.
 final class BatteryTimeEstimator: @unchecked Sendable {
+    static let emaResetGapSeconds: TimeInterval = 10.0
+
     private let lock = NSLock()
     private let emaAlpha: Double
     private let maxEstimateMinutes: Int
 
     private var smoothedCurrentMA: Double?
     private var lastWasCharging: Bool?
+    private var lastSampleTimestamp: Date?
 
     init(emaAlpha: Double = 0.25, maxEstimateMinutes: Int = 99 * 60) {
         self.emaAlpha = min(max(emaAlpha, 0.05), 1.0)
@@ -20,6 +23,7 @@ final class BatteryTimeEstimator: @unchecked Sendable {
         defer { lock.unlock() }
         smoothedCurrentMA = nil
         lastWasCharging = nil
+        lastSampleTimestamp = nil
     }
 
     /// Filters invalid macOS / IOKit time-remaining sentinels (0, negative, 65535, absurdly high).
@@ -40,10 +44,18 @@ final class BatteryTimeEstimator: @unchecked Sendable {
         maxCapacityMAh: Int?,
         batteryCurrentA: Double,
         batteryPowerW: Double,
-        batteryVoltageV: Double
+        batteryVoltageV: Double,
+        at now: Date? = nil
     ) -> Int? {
         lock.lock()
         defer { lock.unlock() }
+
+        if let now, let previousTimestamp = lastSampleTimestamp {
+            let elapsed = now.timeIntervalSince(previousTimestamp)
+            if elapsed > Self.emaResetGapSeconds || elapsed < 0 {
+                smoothedCurrentMA = nil
+            }
+        }
 
         if let previousMode = lastWasCharging, previousMode != isCharging {
             smoothedCurrentMA = nil
@@ -64,7 +76,7 @@ final class BatteryTimeEstimator: @unchecked Sendable {
                 return nil
             }
         } else {
-            guard clampedSoc > 0 else { return 0 }
+            guard clampedSoc > 0 else { return nil }
             if batteryCurrentA < -0.05 {
                 instantCurrentMA = abs(batteryCurrentA) * 1000.0
             } else if batteryPowerW < -0.5, batteryVoltageV > 1.0 {
@@ -83,6 +95,9 @@ final class BatteryTimeEstimator: @unchecked Sendable {
             currentMA = instantCurrentMA
         }
         smoothedCurrentMA = currentMA
+        if let now {
+            lastSampleTimestamp = now
+        }
 
         let effectiveMaxMAh: Double
         if let maxCapacityMAh, maxCapacityMAh > 100 {
@@ -131,8 +146,9 @@ final class BatteryTimeEstimator: @unchecked Sendable {
         }
 
         guard hours.isFinite, hours > 0 else { return nil }
-        let minutes = Int((hours * 60.0).rounded())
-        return min(max(minutes, 1), maxEstimateMinutes)
+        let rawMinutes = (hours * 60.0).rounded()
+        let clampedMinutes = min(max(rawMinutes, 1.0), Double(maxEstimateMinutes))
+        return Int(clampedMinutes)
     }
 
     func estimate(
@@ -143,7 +159,8 @@ final class BatteryTimeEstimator: @unchecked Sendable {
         maxCapacityMAh: Int?,
         batteryCurrentA: Double,
         batteryPowerW: Double,
-        batteryVoltageV: Double
+        batteryVoltageV: Double,
+        at now: Date? = nil
     ) -> (minutes: Int, isToFull: Bool)? {
         guard let minutes = estimateMinutes(
             isCharging: isCharging,
@@ -153,7 +170,8 @@ final class BatteryTimeEstimator: @unchecked Sendable {
             maxCapacityMAh: maxCapacityMAh,
             batteryCurrentA: batteryCurrentA,
             batteryPowerW: batteryPowerW,
-            batteryVoltageV: batteryVoltageV
+            batteryVoltageV: batteryVoltageV,
+            at: now
         ) else {
             return nil
         }

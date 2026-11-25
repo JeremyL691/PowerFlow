@@ -130,6 +130,7 @@ final class PowerSettingsStore {
         }
     }
 
+    private(set) var launchAtLoginRequiresApproval: Bool = false
     private(set) var launchAtLoginError: String?
 
     /// Pass `nil` defaults to keep settings in memory only.
@@ -143,6 +144,7 @@ final class PowerSettingsStore {
         self.manageLaunchAtLogin = manageLaunchAtLogin
         self.settings = Self.load(from: userDefaults, key: storageKey)
         self.launchAtLogin = false
+        self.launchAtLoginRequiresApproval = false
         self.launchAtLoginError = nil
         if manageLaunchAtLogin {
             refreshLaunchAtLoginStatus()
@@ -151,9 +153,32 @@ final class PowerSettingsStore {
 
     func refreshLaunchAtLoginStatus() {
         guard manageLaunchAtLogin else { return }
+        syncLaunchAtLoginStatus(SMAppService.mainApp.status)
+    }
+
+    func openLoginItemsSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
+    func syncLaunchAtLoginStatus(_ status: SMAppService.Status) {
         isSyncingLaunchAtLogin = true
         defer { isSyncingLaunchAtLogin = false }
-        launchAtLogin = SMAppService.mainApp.status == .enabled
+        switch status {
+        case .enabled:
+            launchAtLogin = true
+            launchAtLoginRequiresApproval = false
+            launchAtLoginError = nil
+        case .requiresApproval:
+            launchAtLogin = true
+            launchAtLoginRequiresApproval = true
+            launchAtLoginError = nil
+        case .notRegistered, .notFound:
+            launchAtLogin = false
+            launchAtLoginRequiresApproval = false
+        @unknown default:
+            launchAtLogin = false
+            launchAtLoginRequiresApproval = false
+        }
     }
 
     func resetToDefaults() {
@@ -171,8 +196,13 @@ final class PowerSettingsStore {
             }
             refreshLaunchAtLoginStatus()
         } catch {
-            launchAtLoginError = error.localizedDescription
-            refreshLaunchAtLoginStatus()
+            let status = SMAppService.mainApp.status
+            if status == .requiresApproval {
+                syncLaunchAtLoginStatus(status)
+            } else {
+                launchAtLoginError = error.localizedDescription
+                syncLaunchAtLoginStatus(status)
+            }
         }
     }
 

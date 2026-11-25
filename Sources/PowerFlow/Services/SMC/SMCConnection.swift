@@ -269,9 +269,50 @@ final class SMCConnection: SMCKeyReading, @unchecked Sendable {
         kern_return_t(truncatingIfNeeded: MACH_SEND_INVALID_DEST)
     ]
 
+    /// Injectable kernel transport seam for unit testing reconnect & backoff behavior.
+    struct Transport: Sendable {
+        let open: @Sendable () -> io_connect_t
+        let close: @Sendable (io_connect_t) -> Void
+        let callStructMethod: @Sendable (io_connect_t, inout SMCKeyData, inout SMCKeyData) -> kern_return_t
+
+        static let live = Transport(
+            open: {
+                guard let matching = IOServiceMatching("AppleSMC") else { return 0 }
+                let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+                guard service != IO_OBJECT_NULL else { return 0 }
+                defer { IOObjectRelease(service) }
+
+                var newConnection: io_connect_t = 0
+                let kr = IOServiceOpen(service, mach_task_self_, 0, &newConnection)
+                return kr == KERN_SUCCESS ? newConnection : 0
+            },
+            close: { conn in
+                IOServiceClose(conn)
+            },
+            callStructMethod: { conn, input, output in
+                var outputSize = MemoryLayout<SMCKeyData>.stride
+                return IOConnectCallStructMethod(
+                    conn,
+                    Command.handleYPCEventSelector,
+                    &input,
+                    MemoryLayout<SMCKeyData>.stride,
+                    &output,
+                    &outputSize
+                )
+            }
+        )
+    }
+
+    private static let initialOpenBackoffSeconds: TimeInterval = 2.0
+    private static let maxOpenBackoffSeconds: TimeInterval = 60.0
+
     private let lock = NSLock()
+    private let transport: Transport
+    private let uptime: @Sendable () -> TimeInterval
     private var connection: io_connect_t = 0
     private var keyInfoCache: [UInt32: CachedKeyInfo] = [:]
+    private var consecutiveOpenFailures: Int = 0
+    private var nextOpenAttemptUptime: TimeInterval = 0
 
     var isOpen: Bool {
         lock.lock()
@@ -279,7 +320,12 @@ final class SMCConnection: SMCKeyReading, @unchecked Sendable {
         return connection != 0
     }
 
-    init() {
+    init(
+        transport: Transport = .live,
+        uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) {
+        self.transport = transport
+        self.uptime = uptime
         openLocked()
     }
 
@@ -317,7 +363,7 @@ final class SMCConnection: SMCKeyReading, @unchecked Sendable {
         input.keyInfo.dataSize = keyInfo.dataSize
         input.data8 = Command.readBytes
 
-        switch callSMCLocked(input: input) {
+        switch callSMCWithReconnectLocked(input: input) {
         case .success(let output):
             let size = Int(keyInfo.dataSize)
             let extractedBytes = Self.extractBytes(from: output.bytes, count: size)
@@ -327,27 +373,33 @@ final class SMCConnection: SMCKeyReading, @unchecked Sendable {
                 dataType: Self.fourCCString(keyInfo.dataType),
                 bytes: extractedBytes
             )
-        case .keyNotFound, .transientFailure:
-            return nil
-        case .connectionLost:
-            closeLocked()
+        case .keyNotFound, .transientFailure, .connectionLost:
             return nil
         }
     }
 
     // MARK: - Private Helpers (must hold lock)
 
-    private func openLocked() {
+    private func openLocked(bypassCooldown: Bool = false) {
         guard connection == 0 else { return }
-        guard let matching = IOServiceMatching("AppleSMC") else { return }
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
-        guard service != IO_OBJECT_NULL else { return }
-        defer { IOObjectRelease(service) }
+        let now = uptime()
+        if !bypassCooldown && consecutiveOpenFailures > 0 && now < nextOpenAttemptUptime {
+            return
+        }
 
-        var newConnection: io_connect_t = 0
-        let kr = IOServiceOpen(service, mach_task_self_, 0, &newConnection)
-        if kr == KERN_SUCCESS {
+        let newConnection = transport.open()
+        if newConnection != 0 {
             connection = newConnection
+            consecutiveOpenFailures = 0
+            nextOpenAttemptUptime = 0
+        } else {
+            consecutiveOpenFailures += 1
+            let shift = min(consecutiveOpenFailures - 1, 5)
+            let delay = min(
+                Self.maxOpenBackoffSeconds,
+                Self.initialOpenBackoffSeconds * Double(1 << shift)
+            )
+            nextOpenAttemptUptime = now + delay
         }
     }
 
@@ -363,7 +415,7 @@ final class SMCConnection: SMCKeyReading, @unchecked Sendable {
         input.key = fourCC
         input.data8 = Command.readKeyInfo
 
-        switch callSMCLocked(input: input) {
+        switch callSMCWithReconnectLocked(input: input) {
         case .success(let output):
             let cached: CachedKeyInfo = output.keyInfo.dataSize > 0
                 ? .available(output.keyInfo)
@@ -373,36 +425,46 @@ final class SMCConnection: SMCKeyReading, @unchecked Sendable {
         case .keyNotFound:
             keyInfoCache[fourCC] = .unavailable
             return .unavailable
-        case .transientFailure:
-            return nil
-        case .connectionLost:
-            closeLocked()
+        case .transientFailure, .connectionLost:
             return nil
         }
     }
 
+    /// Preserves `keyInfoCache` across reconnects since SMC key metadata is immutable per boot.
     private func closeLocked() {
         if connection != 0 {
-            IOServiceClose(connection)
+            transport.close(connection)
             connection = 0
         }
-        keyInfoCache.removeAll()
+    }
+
+    /// Executes an SMC call, reopening and retrying once if the user client handle was lost
+    /// (e.g. across sleep/wake) to avoid tearing a wake sample.
+    private func callSMCWithReconnectLocked(input: SMCKeyData) -> CallOutcome {
+        let firstOutcome = callSMCLocked(input: input)
+        guard case .connectionLost = firstOutcome else {
+            return firstOutcome
+        }
+
+        closeLocked()
+        openLocked(bypassCooldown: true)
+        guard connection != 0 else {
+            return .connectionLost
+        }
+
+        let retryOutcome = callSMCLocked(input: input)
+        if case .connectionLost = retryOutcome {
+            closeLocked()
+        }
+        return retryOutcome
     }
 
     private func callSMCLocked(input: SMCKeyData) -> CallOutcome {
         guard connection != 0 else { return .connectionLost }
         var inputStruct = input
         var outputStruct = SMCKeyData()
-        var outputSize = MemoryLayout<SMCKeyData>.stride
 
-        let result = IOConnectCallStructMethod(
-            connection,
-            Command.handleYPCEventSelector,
-            &inputStruct,
-            MemoryLayout<SMCKeyData>.stride,
-            &outputStruct,
-            &outputSize
-        )
+        let result = transport.callStructMethod(connection, &inputStruct, &outputStruct)
 
         guard result == KERN_SUCCESS else {
             return Self.connectionLostCodes.contains(result) ? .connectionLost : .transientFailure

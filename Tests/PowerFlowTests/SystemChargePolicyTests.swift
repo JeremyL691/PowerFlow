@@ -68,6 +68,74 @@ final class SystemChargePolicyTests: XCTestCase {
         XCTAssertNil(reader.currentPolicy())
     }
 
+    func testTransientReadFailureDoesNotPoisonModificationStampOrEvictCachedPolicy() throws {
+        final class ToggleableLoader: @unchecked Sendable {
+            private let lock = NSLock()
+            var shouldFail = true
+            var loadCount = 0
+
+            func load(_ url: URL) throws -> Data {
+                lock.lock()
+                loadCount += 1
+                let fail = shouldFail
+                lock.unlock()
+                if fail {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                return try Data(contentsOf: url)
+            }
+
+            func setFail(_ fail: Bool) {
+                lock.lock()
+                shouldFail = fail
+                lock.unlock()
+            }
+
+            var calls: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return loadCount
+            }
+        }
+
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).plist")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try file([manual(80)]).write(to: url)
+
+        let loader = ToggleableLoader()
+        let reader = SystemChargePolicyReader(
+            url: url,
+            bootSession: Self.session,
+            dataLoader: { try loader.load($0) }
+        )
+
+        // First read fails transiently: must not record mtime so next call retries without mtime change
+        XCTAssertNil(reader.currentPolicy())
+        XCTAssertEqual(loader.calls, 1)
+
+        loader.setFail(false)
+        XCTAssertEqual(reader.currentPolicy()?.limitPercent, 80)
+        XCTAssertEqual(loader.calls, 2)
+
+        // Steady-state call with unchanged mtime hits stat cache without reading file
+        XCTAssertEqual(reader.currentPolicy()?.limitPercent, 80)
+        XCTAssertEqual(loader.calls, 2)
+
+        // File updated with new mtime, but read fails transiently: keep previous policy and retry next tick
+        try file([manual(90)]).write(to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)],
+            ofItemAtPath: url.path
+        )
+        loader.setFail(true)
+        XCTAssertEqual(reader.currentPolicy()?.limitPercent, 80)
+        XCTAssertEqual(loader.calls, 3)
+
+        loader.setFail(false)
+        XCTAssertEqual(reader.currentPolicy()?.limitPercent, 90)
+        XCTAssertEqual(loader.calls, 4)
+    }
+
     // MARK: - Effect on the snapshot
 
     func testDrainingToTheLimitWhilePluggedIn() {

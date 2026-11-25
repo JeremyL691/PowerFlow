@@ -533,4 +533,133 @@ final class CoreUtilitiesTests: XCTestCase {
         XCTAssertEqual(PowerFormatters.rpm(2450.6), "2,451 RPM")
         XCTAssertEqual(PowerFormatters.rpm(-10), "—")
     }
+
+    func testOverflowSafeFormattersAndIntMinGrouping() {
+        XCTAssertEqual(PowerFormatters.integerGrouped(Int.min), "-9,223,372,036,854,775,808")
+        XCTAssertFalse(PowerFormatters.compactWatts(1e30).isEmpty)
+        XCTAssertTrue(PowerFormatters.compactWatts(1e30).hasSuffix("W"))
+        XCTAssertTrue(PowerFormatters.rpm(1e30).hasSuffix(" RPM"))
+    }
+
+    func testTimeEstimatorZeroSoCReturnsNilAndTimestampGapResetsEMA() {
+        let estimator = BatteryTimeEstimator(emaAlpha: 0.25)
+        let t0 = Date(timeIntervalSince1970: 2_000)
+
+        // 0% SoC discharging must return nil (not 0).
+        let zeroSoc = estimator.estimateMinutes(
+            isCharging: false,
+            batteryPercent: 0,
+            currentChargeMAh: 0,
+            maxCapacityMAh: 6000,
+            batteryCurrentA: -1.5,
+            batteryPowerW: -18.0,
+            batteryVoltageV: 12.0,
+            at: t0
+        )
+        XCTAssertNil(zeroSoc)
+
+        // Seed EMA at t0 with -1.5A -> 120 min
+        let first = estimator.estimateMinutes(
+            isCharging: false,
+            batteryPercent: 50,
+            currentChargeMAh: 3000,
+            maxCapacityMAh: 6000,
+            batteryCurrentA: -1.5,
+            batteryPowerW: -18.0,
+            batteryVoltageV: 12.0,
+            at: t0
+        )
+        XCTAssertEqual(first, 120)
+
+        // Within <= 10s (at t0 + 2s), EMA smooths -3.0A -> 1875 mA -> 96 min.
+        let smoothed = estimator.estimateMinutes(
+            isCharging: false,
+            batteryPercent: 50,
+            currentChargeMAh: 3000,
+            maxCapacityMAh: 6000,
+            batteryCurrentA: -3.0,
+            batteryPowerW: -36.0,
+            batteryVoltageV: 12.0,
+            at: t0.addingTimeInterval(2.0)
+        )
+        XCTAssertEqual(smoothed, 96)
+
+        // After > 10s gap (e.g. post-sleep or dormant wake at t0 + 15s), EMA resets to instant -3.0A -> 60 min.
+        let resetEstimate = estimator.estimateMinutes(
+            isCharging: false,
+            batteryPercent: 50,
+            currentChargeMAh: 3000,
+            maxCapacityMAh: 6000,
+            batteryCurrentA: -3.0,
+            batteryPowerW: -36.0,
+            batteryVoltageV: 12.0,
+            at: t0.addingTimeInterval(15.0)
+        )
+        XCTAssertEqual(resetEstimate, 60)
+    }
+
+    func testL10nChargingHoldPreservesAlDenteAndIncludesApprovalKeys() {
+        XCTAssertEqual(
+            L10n.chargingHold("Charge Limit (80% · AlDente)", chargeLimitPercent: 80, language: .english),
+            "Charge Limit (80% · AlDente)"
+        )
+        XCTAssertEqual(
+            L10n.chargingHold("Charge Limit (80% · AlDente)", chargeLimitPercent: 80, language: .simplifiedChinese),
+            "充电上限 (80% · AlDente)"
+        )
+        XCTAssertEqual(
+            L10n.chargingHold("Charge Limit (80%)", chargeLimitPercent: 80, language: .english),
+            "Charge Limit (80%)"
+        )
+        XCTAssertFalse(L10n.string(.launchAtLoginRequiresApproval, language: .english).isEmpty)
+        XCTAssertFalse(L10n.string(.openLoginItemsSettings, language: .simplifiedChinese).isEmpty)
+    }
+
+    @MainActor
+    func testPowerSettingsStoreTracksLaunchAtLoginApprovalStatus() {
+        let store = PowerSettingsStore(userDefaults: nil, manageLaunchAtLogin: false)
+        XCTAssertFalse(store.launchAtLogin)
+        XCTAssertFalse(store.launchAtLoginRequiresApproval)
+
+        store.syncLaunchAtLoginStatus(.requiresApproval)
+        XCTAssertTrue(store.launchAtLogin)
+        XCTAssertTrue(store.launchAtLoginRequiresApproval)
+
+        store.syncLaunchAtLoginStatus(.enabled)
+        XCTAssertTrue(store.launchAtLogin)
+        XCTAssertFalse(store.launchAtLoginRequiresApproval)
+
+        store.syncLaunchAtLoginStatus(.notRegistered)
+        XCTAssertFalse(store.launchAtLogin)
+        XCTAssertFalse(store.launchAtLoginRequiresApproval)
+    }
+
+    func testPowerSnapshotACStateAlignmentDuringUnplugDebounce() {
+        let debouncingUnplug = PowerSnapshot(
+            isDataAvailable: true,
+            connectionPhase: .onAC,
+            flowMode: .batteryOnly,
+            isExternalConnected: false
+        )
+        XCTAssertFalse(debouncingUnplug.isEffectivelyOnAC)
+        XCTAssertFalse(debouncingUnplug.isAdapterSupplyingPower)
+
+        let connecting = PowerSnapshot(
+            isDataAvailable: true,
+            connectionPhase: .connectingAC,
+            flowMode: .connectingAC,
+            isExternalConnected: false
+        )
+        XCTAssertTrue(connecting.isEffectivelyOnAC)
+        XCTAssertTrue(connecting.isAdapterSupplyingPower)
+
+        let unknownOnAC = PowerSnapshot(
+            isDataAvailable: true,
+            connectionPhase: .onAC,
+            flowMode: .unknown,
+            isExternalConnected: true
+        )
+        XCTAssertTrue(unknownOnAC.isEffectivelyOnAC)
+        XCTAssertFalse(unknownOnAC.isAdapterSupplyingPower)
+    }
 }

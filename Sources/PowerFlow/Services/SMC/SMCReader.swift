@@ -86,10 +86,12 @@ final class SMCReader: @unchecked Sendable {
         static let packagePowerCandidates = ["PHPC", "PCPC", "PCPT", "PC0R", "PCPR"]
         static let cpuTemperatureCandidates = [
             "Tp09", "Tp01", "Tp05", "Tp0D", "Tp0H", "Tp0L", "Tp0P", "Tp0X", "Tp0b", "Tp0T",
-            "Tp1h", "Tp1t", "Tp1p", "Tp1l", "Te05", "Te0L", "Te0P", "Te0S"
+            "Tp1h", "Tp1t", "Tp1p", "Tp1l", "Te05", "Te0L", "Te0P", "Te0S",
+            "TC0D", "TC0P", "TC1C", "TC0E", "TC0F"
         ]
         static let gpuTemperatureCandidates = [
-            "Tg05", "Tg0D", "Tg0L", "Tg0T", "Tg04", "Tg0C", "Tg0K", "Tg0S", "Tg0f", "Tg0j"
+            "Tg05", "Tg0D", "Tg0L", "Tg0T", "Tg04", "Tg0C", "Tg0K", "Tg0S", "Tg0f", "Tg0j",
+            "TG0D", "TG0P"
         ]
     }
 
@@ -105,13 +107,20 @@ final class SMCReader: @unchecked Sendable {
         static let maxFanCount: Int = 16
         static let maxFanRPM: Double = 25_000.0
         static let maxPortCurrentA: Double = 10.0
-        static let portNumbers: ClosedRange<Int> = 1...4
+        static let portNumbers: ClosedRange<Int> = 1...6
+    }
+
+    private enum DieSensorGroup {
+        case cpu
+        case gpu
     }
 
     private let keyReader: SMCKeyReading
     private let useLittleEndianBatteryKeys: Bool
     private let cacheLock = NSLock()
     private var cachedPackagePowerKey: String?
+    private var cachedCPUTempKeys: [String]?
+    private var cachedGPUTempKeys: [String]?
     private var cachedFanCount: Int?
     private var cachedFanMaxRPM: [Int: Double] = [:]
 
@@ -121,11 +130,21 @@ final class SMCReader: @unchecked Sendable {
             self.useLittleEndianBatteryKeys = explicit
         } else {
             #if arch(arm64)
-            self.useLittleEndianBatteryKeys = (keyReader == nil)
+            self.useLittleEndianBatteryKeys = (keyReader == nil || keyReader is SMCConnection)
             #else
             self.useLittleEndianBatteryKeys = false
             #endif
         }
+    }
+
+    /// Clears dynamic discovery caches so post-wake samples re-probe primary package power
+    /// (`PHPC`) and die-temperature sensors.
+    func resetDiscoveryCaches() {
+        cacheLock.lock()
+        cachedPackagePowerKey = nil
+        cachedCPUTempKeys = nil
+        cachedGPUTempKeys = nil
+        cacheLock.unlock()
     }
 
     func readSample(full: Bool) -> SMCPowerSample {
@@ -150,8 +169,8 @@ final class SMCReader: @unchecked Sendable {
         let cycleCount = readSanitizedCycleCount(Key.cycleCount)
         let packagePowerW = readPackagePower()
         let displayPowerW = readSanitizedPower(Key.displayPower, allowNegative: false)
-        let cpuTemperatureC = readMaxDieTemperature(candidates: Key.cpuTemperatureCandidates)
-        let gpuTemperatureC = readMaxDieTemperature(candidates: Key.gpuTemperatureCandidates)
+        let cpuTemperatureC = readMaxDieTemperature(group: .cpu, candidates: Key.cpuTemperatureCandidates)
+        let gpuTemperatureC = readMaxDieTemperature(group: .gpu, candidates: Key.gpuTemperatureCandidates)
         let fans = readFans()
         let portOutputs = readPortOutputs()
 
@@ -198,15 +217,45 @@ final class SMCReader: @unchecked Sendable {
         return nil
     }
 
-    /// Reads every candidate on each full sample and returns the hottest valid value.
-    /// Non-existent keys are cheap because SMCConnection caches their absence.
-    private func readMaxDieTemperature(candidates: [String]) -> Double? {
+    /// Probes all die-temperature candidates until at least one yields a valid reading, then pins
+    /// the present keys to avoid ~20+ absent-key lock/read calls on every 1s tick.
+    /// Cleared by `resetDiscoveryCaches()` so wake re-probes all sensors.
+    private func readMaxDieTemperature(group: DieSensorGroup, candidates: [String]) -> Double? {
+        cacheLock.lock()
+        let pinnedKeys: [String]? = (group == .cpu) ? cachedCPUTempKeys : cachedGPUTempKeys
+        cacheLock.unlock()
+
+        if let pinnedKeys {
+            var maxTemp: Double?
+            for key in pinnedKeys {
+                if let temp = readSanitizedDieTemperature(key) {
+                    maxTemp = max(maxTemp ?? temp, temp)
+                }
+            }
+            return maxTemp
+        }
+
+        var presentKeys: [String] = []
         var maxTemp: Double?
         for candidate in candidates {
-            if let temp = readSanitizedDieTemperature(candidate) {
+            guard let smcValue = keyReader.readKey(candidate) else { continue }
+            presentKeys.append(candidate)
+            if let temp = Self.sanitizeDieTemperature(smcValue) {
                 maxTemp = max(maxTemp ?? temp, temp)
             }
         }
+
+        if maxTemp != nil && !presentKeys.isEmpty {
+            cacheLock.lock()
+            switch group {
+            case .cpu:
+                cachedCPUTempKeys = presentKeys
+            case .gpu:
+                cachedGPUTempKeys = presentKeys
+            }
+            cacheLock.unlock()
+        }
+
         return maxTemp
     }
 
@@ -291,7 +340,12 @@ final class SMCReader: @unchecked Sendable {
     }
 
     private func readSanitizedDieTemperature(_ key: String) -> Double? {
-        guard let value = keyReader.readKey(key)?.floatValue(),
+        guard let smcValue = keyReader.readKey(key) else { return nil }
+        return Self.sanitizeDieTemperature(smcValue)
+    }
+
+    private static func sanitizeDieTemperature(_ smcValue: SMCValue) -> Double? {
+        guard let value = smcValue.floatValue(),
               value.isFinite,
               value >= Bounds.minDieTempC,
               value <= Bounds.maxDieTempC
@@ -340,9 +394,9 @@ final class SMCReader: @unchecked Sendable {
         else {
             return nil
         }
-        // Integer SMC voltage keys (e.g. ui16 B0AV) report millivolts (e.g. 13104 mV).
+        // Integer SMC voltage keys (e.g. ui16 B0AV, SBAV) always report millivolts (e.g. 13104 mV).
         let volts: Double
-        if Self.isIntegerType(smcValue.dataType) && raw > Bounds.maxVoltageV {
+        if Self.isIntegerType(smcValue.dataType) {
             volts = raw / 1000.0
         } else {
             volts = raw

@@ -53,7 +53,7 @@ struct FlowLinksView: NSViewRepresentable {
 @MainActor
 final class FlowLinksNSView: NSView {
     private static let pingBaseDuration: CFTimeInterval = 2.4
-    private static let highFrameRate = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+    private static let pingFrameRate = CAFrameRateRange(minimum: 20, maximum: 30, preferred: 30)
 
     private var layers: [String: FlowLinkLayer] = [:]
     private var fadingLayers: [FlowLinkLayer] = []
@@ -87,6 +87,11 @@ final class FlowLinksNSView: NSView {
         nil
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        rebuild()
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
@@ -94,6 +99,11 @@ final class FlowLinksNSView: NSView {
         } else {
             rebuild()
         }
+    }
+
+    private static func quantizedWatts(_ watts: Double) -> Double {
+        guard watts.isFinite else { return 0 }
+        return (max(0, watts) * 10).rounded() / 10
     }
 
     func apply(
@@ -106,24 +116,35 @@ final class FlowLinksNSView: NSView {
         hubTint newHubTint: NSColor?,
         hubWatts newHubWatts: Double
     ) {
+        let normalizedLinks = newLinks.map { link in
+            FlowLinksView.LinkStyle(
+                id: link.id,
+                route: link.route,
+                tint: link.tint,
+                watts: Self.quantizedWatts(link.watts),
+                isActive: link.isActive
+            )
+        }
+        let normalizedHubWatts = Self.quantizedWatts(newHubWatts)
+
         guard
-            newLinks != links
+            normalizedLinks != links
                 || newAnimating != isAnimating
                 || newReduceMotion != reduceMotion
                 || newIsDark != isDark
                 || newDifferentiate != differentiateWithoutColor
                 || newHub != hub
                 || newHubTint != hubTint
-                || newHubWatts != hubWatts
+                || normalizedHubWatts != hubWatts
         else { return }
-        links = newLinks
+        links = normalizedLinks
         isAnimating = newAnimating
         reduceMotion = newReduceMotion
         isDark = newIsDark
         differentiateWithoutColor = newDifferentiate
         hub = newHub
         hubTint = newHubTint
-        hubWatts = newHubWatts
+        hubWatts = normalizedHubWatts
         rebuild()
     }
 
@@ -168,12 +189,6 @@ final class FlowLinksNSView: NSView {
                     fadingLayers.append(stale)
                     CATransaction.begin()
                     CATransaction.setDisableActions(true)
-                    let fadeOut = CABasicAnimation(keyPath: "opacity")
-                    fadeOut.fromValue = stale.presentation()?.opacity ?? stale.opacity
-                    fadeOut.toValue = 0
-                    fadeOut.duration = 0.2
-                    stale.opacity = 0
-                    stale.add(fadeOut, forKey: "fadeOut")
                     CATransaction.setCompletionBlock { [weak self, weak stale] in
                         MainActor.assumeIsolated {
                             guard let stale else { return }
@@ -181,6 +196,12 @@ final class FlowLinksNSView: NSView {
                             self?.fadingLayers.removeAll { $0 === stale }
                         }
                     }
+                    let fadeOut = CABasicAnimation(keyPath: "opacity")
+                    fadeOut.fromValue = stale.presentation()?.opacity ?? stale.opacity
+                    fadeOut.toValue = 0
+                    fadeOut.duration = 0.2
+                    stale.opacity = 0
+                    stale.add(fadeOut, forKey: "fadeOut")
                     CATransaction.commit()
                 } else {
                     stale.stopAllAnimations()
@@ -194,10 +215,11 @@ final class FlowLinksNSView: NSView {
                     layers[link.id] = created
                     return created
                 }()
-                linkLayer.frame = bounds
+                if linkLayer.frame != bounds {
+                    linkLayer.frame = bounds
+                }
                 linkLayer.update(
                     link,
-                    path: path(for: link.route),
                     allowMotion: allowMotion,
                     isDark: isDark,
                     differentiateWithoutColor: differentiateWithoutColor,
@@ -206,9 +228,9 @@ final class FlowLinksNSView: NSView {
                 )
             }
             CATransaction.commit()
-        }
 
-        syncPing(allowMotion: allowMotion)
+            syncPing(allowMotion: allowMotion)
+        }
     }
 
     // MARK: - Hub Ping
@@ -288,7 +310,7 @@ final class FlowLinksNSView: NSView {
         group.repeatCount = .infinity
         group.timingFunction = CAMediaTimingFunction(name: .easeOut)
         group.isRemovedOnCompletion = false
-        group.preferredFrameRateRange = Self.highFrameRate
+        group.preferredFrameRateRange = Self.pingFrameRate
         shape.add(group, forKey: "ping")
 
         let replicator = CAReplicatorLayer()
@@ -313,17 +335,6 @@ final class FlowLinksNSView: NSView {
         layer.speed = speed
         layer.timeOffset = local - layer.convertTime(now, from: nil)
     }
-
-    private func path(for route: FlowLayout.Route) -> CGPath {
-        let path = CGMutablePath()
-        path.move(to: route.start)
-        path.addCurve(
-            to: route.end,
-            control1: route.control1,
-            control2: route.control2
-        )
-        return path
-    }
 }
 
 /// One precision conduit: wattage-scaled soft halo, vibrant calibrated track, and a tangentially
@@ -332,7 +343,9 @@ private final class FlowLinkLayer: CALayer {
     private static let referenceSpeed = 60.0
     private static let pulseSpacing: CGFloat = 34
     private static let pulseLength: CGFloat = 28
-    private static let frameRate = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+    /// Constant margin around the curve bounding box covering max halo/comet width without drifting on wattage jitter.
+    private static let maskPadding: CGFloat = 24
+    private static let frameRate = CAFrameRateRange(minimum: 24, maximum: 60, preferred: 60)
     private static let transitionDuration: CFTimeInterval = 0.45
     @MainActor private static let transitionTiming = CAMediaTimingFunction(controlPoints: 0.42, 0, 0.58, 1)
     @MainActor private static let entranceTiming = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
@@ -347,6 +360,16 @@ private final class FlowLinkLayer: CALayer {
     private var didDrawOn = false
     private var animatedRoute: FlowLayout.Route?
     private var appliedRoute: FlowLayout.Route?
+    private var appliedBounds: CGRect = .zero
+    private var appliedLocalFrame: CGRect?
+    private var appliedLocalPath: CGPath?
+    private var appliedTrackColor: CGColor?
+    private var appliedIsDark: Bool?
+    private var appliedWidth: CGFloat?
+    private var appliedHaloWidth: CGFloat?
+    private var appliedHaloOpacity: Float?
+    private var appliedTrackOpacity: Float?
+    private var appliedDashPattern: [NSNumber]?
 
     override init() {
         super.init()
@@ -361,6 +384,7 @@ private final class FlowLinkLayer: CALayer {
 
         pulse.startPoint = CGPoint(x: 0, y: 0.5)
         pulse.endPoint = CGPoint(x: 1, y: 0.5)
+        pulse.locations = [0.0, 0.35, 0.72, 0.92, 1.0]
         pulse.opacity = 0
         pulses.addSublayer(pulse)
 
@@ -383,11 +407,23 @@ private final class FlowLinkLayer: CALayer {
     @MainActor
     func stopAllAnimations() {
         pulse.removeAllAnimations()
+        pulses.removeAllAnimations()
+        pulseMask.removeAllAnimations()
         trackLayer.removeAllAnimations()
         haloLayer.removeAllAnimations()
         pulses.isHidden = true
         animatedRoute = nil
         appliedRoute = nil
+        appliedBounds = .zero
+        appliedLocalFrame = nil
+        appliedLocalPath = nil
+        appliedTrackColor = nil
+        appliedIsDark = nil
+        appliedWidth = nil
+        appliedHaloWidth = nil
+        appliedHaloOpacity = nil
+        appliedTrackOpacity = nil
+        appliedDashPattern = nil
         didDrawOn = false
     }
 
@@ -398,10 +434,20 @@ private final class FlowLinkLayer: CALayer {
         pulse.removeAllAnimations()
     }
 
+    private static func makePath(for route: FlowLayout.Route) -> CGPath {
+        let path = CGMutablePath()
+        path.move(to: route.start)
+        path.addCurve(
+            to: route.end,
+            control1: route.control1,
+            control2: route.control2
+        )
+        return path
+    }
+
     @MainActor
     func update(
         _ link: FlowLinksView.LinkStyle,
-        path: CGPath,
         allowMotion: Bool,
         isDark: Bool,
         differentiateWithoutColor: Bool,
@@ -437,33 +483,104 @@ private final class FlowLinkLayer: CALayer {
         // Structure moves spring the conduit path from wherever the previous
         // route currently renders, matching the SwiftUI node spring.
         let routeChanged = appliedRoute != nil && appliedRoute != link.route
-        let previousPath = routeChanged ? (trackLayer.presentation()?.path ?? trackLayer.path) : nil
-        appliedRoute = link.route
+        let needsPathUpdate = appliedRoute != link.route || appliedBounds != bounds || appliedLocalPath == nil
 
-        let previousTrackWidth = trackLayer.presentation()?.lineWidth ?? trackLayer.lineWidth
-        let previousTrackColor = trackLayer.presentation()?.strokeColor ?? trackLayer.strokeColor
-        let previousTrackOpacity = trackLayer.presentation()?.opacity ?? trackLayer.opacity
-        let previousHaloWidth = haloLayer.presentation()?.lineWidth ?? haloLayer.lineWidth
-        let previousHaloColor = haloLayer.presentation()?.strokeColor ?? haloLayer.strokeColor
-        let previousHaloOpacity = haloLayer.presentation()?.opacity ?? haloLayer.opacity
+        var newGlobalPath: CGPath?
+        var previousGlobalPath: CGPath?
+        var pathTranslation = CGAffineTransform.identity
 
-        haloLayer.frame = bounds
-        haloLayer.path = path
-        haloLayer.lineWidth = haloWidth
-        haloLayer.strokeColor = trackColor
-        haloLayer.opacity = haloOpacity
+        if needsPathUpdate {
+            let builtPath = Self.makePath(for: link.route)
+            newGlobalPath = builtPath
+            previousGlobalPath = routeChanged ? (trackLayer.presentation()?.path ?? trackLayer.path) : nil
 
-        trackLayer.frame = bounds
-        trackLayer.path = path
-        trackLayer.lineWidth = width
-        trackLayer.lineDashPattern = dashPattern
-        trackLayer.strokeColor = trackColor
-        trackLayer.opacity = trackOpacity
+            haloLayer.frame = bounds
+            haloLayer.path = builtPath
+            trackLayer.frame = bounds
+            trackLayer.path = builtPath
+
+            let rawBox = builtPath.boundingBoxOfPath
+            let localFrame: CGRect = if rawBox.isNull || rawBox.isInfinite {
+                bounds
+            } else {
+                rawBox.insetBy(dx: -Self.maskPadding, dy: -Self.maskPadding).integral
+            }
+            pathTranslation = CGAffineTransform(translationX: -localFrame.origin.x, y: -localFrame.origin.y)
+            let localPath = builtPath.copy(using: &pathTranslation) ?? builtPath
+
+            if appliedLocalFrame != localFrame {
+                animatedRoute = nil
+            }
+            pulses.frame = localFrame
+            pulseMask.frame = CGRect(origin: .zero, size: localFrame.size)
+            pulseMask.path = localPath
+
+            appliedBounds = bounds
+            appliedRoute = link.route
+            appliedLocalFrame = localFrame
+            appliedLocalPath = localPath
+        }
+
+        let widthChanged = appliedWidth.map { abs($0 - width) > 0.01 } ?? true
+        let haloWidthChanged = appliedHaloWidth.map { abs($0 - haloWidth) > 0.01 } ?? true
+        let colorChanged = appliedTrackColor.map { $0 != trackColor } ?? true
+        let trackOpacityChanged = appliedTrackOpacity.map { abs($0 - trackOpacity) > 0.005 } ?? true
+        let haloOpacityChanged = appliedHaloOpacity.map { abs($0 - haloOpacity) > 0.005 } ?? true
+        let dashChanged = appliedDashPattern != dashPattern
+        let pulseColorChanged = colorChanged || appliedIsDark != isDark
+
+        let previousTrackWidth = shouldAnimateTransitions && widthChanged
+            ? (trackLayer.presentation()?.lineWidth ?? trackLayer.lineWidth)
+            : nil
+        let previousHaloWidth = shouldAnimateTransitions && (widthChanged || haloWidthChanged)
+            ? (haloLayer.presentation()?.lineWidth ?? haloLayer.lineWidth)
+            : nil
+        let previousTrackColor = shouldAnimateTransitions && colorChanged
+            ? (trackLayer.presentation()?.strokeColor ?? trackLayer.strokeColor)
+            : nil
+        let previousHaloColor = shouldAnimateTransitions && colorChanged
+            ? (haloLayer.presentation()?.strokeColor ?? haloLayer.strokeColor)
+            : nil
+        let previousTrackOpacity = shouldAnimateTransitions && trackOpacityChanged
+            ? (trackLayer.presentation()?.opacity ?? trackLayer.opacity)
+            : nil
+        let previousHaloOpacity = shouldAnimateTransitions && haloOpacityChanged
+            ? (haloLayer.presentation()?.opacity ?? haloLayer.opacity)
+            : nil
+
+        if haloWidthChanged {
+            haloLayer.lineWidth = haloWidth
+            appliedHaloWidth = haloWidth
+        }
+        if colorChanged {
+            haloLayer.strokeColor = trackColor
+            trackLayer.strokeColor = trackColor
+            appliedTrackColor = trackColor
+        }
+        if haloOpacityChanged {
+            haloLayer.opacity = haloOpacity
+            appliedHaloOpacity = haloOpacity
+        }
+        if widthChanged {
+            trackLayer.lineWidth = width
+            pulseMask.lineWidth = width + 0.5
+            appliedWidth = width
+        }
+        if dashChanged {
+            trackLayer.lineDashPattern = dashPattern
+            appliedDashPattern = dashPattern
+        }
+        if trackOpacityChanged {
+            trackLayer.opacity = trackOpacity
+            appliedTrackOpacity = trackOpacity
+        }
 
         if shouldAnimateTransitions {
-            if abs(previousTrackWidth - width) > 0.05 {
+            if let previousTrackWidth, abs(previousTrackWidth - width) > 0.05 {
                 animateTransition(keyPath: "lineWidth", on: trackLayer, from: previousTrackWidth, to: width)
-                animateTransition(keyPath: "lineWidth", on: haloLayer, from: previousHaloWidth, to: haloWidth)
+                if let previousHaloWidth {
+                    animateTransition(keyPath: "lineWidth", on: haloLayer, from: previousHaloWidth, to: haloWidth)
+                }
             }
             if let previousTrackColor, previousTrackColor != trackColor {
                 animateTransition(keyPath: "strokeColor", on: trackLayer, from: previousTrackColor, to: trackColor)
@@ -471,10 +588,10 @@ private final class FlowLinkLayer: CALayer {
             if let previousHaloColor, previousHaloColor != trackColor {
                 animateTransition(keyPath: "strokeColor", on: haloLayer, from: previousHaloColor, to: trackColor)
             }
-            if abs(previousTrackOpacity - trackOpacity) > 0.01 {
+            if let previousTrackOpacity, abs(previousTrackOpacity - trackOpacity) > 0.01 {
                 animateTransition(keyPath: "opacity", on: trackLayer, from: previousTrackOpacity, to: trackOpacity)
             }
-            if abs(previousHaloOpacity - haloOpacity) > 0.01 {
+            if let previousHaloOpacity, abs(previousHaloOpacity - haloOpacity) > 0.01 {
                 animateTransition(keyPath: "opacity", on: haloLayer, from: previousHaloOpacity, to: haloOpacity)
             }
         } else {
@@ -497,36 +614,42 @@ private final class FlowLinkLayer: CALayer {
             }
         }
 
-        pulses.frame = bounds
-        pulseMask.frame = bounds
-        pulseMask.path = path
-        pulseMask.lineWidth = width + 0.5
-
-        if routeChanged, allowEntrance, let previousPath {
-            for target in [trackLayer, haloLayer, pulseMask] {
+        if routeChanged, allowEntrance, let previousGlobalPath, let newGlobalPath, let localPath = appliedLocalPath {
+            for target in [trackLayer, haloLayer] {
                 let spring = CASpringAnimation(keyPath: "path")
                 spring.mass = 1
                 spring.stiffness = 224
                 spring.damping = 25.7
                 spring.duration = spring.settlingDuration
-                spring.fromValue = previousPath
-                spring.toValue = path
+                spring.fromValue = previousGlobalPath
+                spring.toValue = newGlobalPath
                 target.add(spring, forKey: "pathSpring")
             }
+            let localPreviousPath = previousGlobalPath.copy(using: &pathTranslation) ?? previousGlobalPath
+            let maskSpring = CASpringAnimation(keyPath: "path")
+            maskSpring.mass = 1
+            maskSpring.stiffness = 224
+            maskSpring.damping = 25.7
+            maskSpring.duration = maskSpring.settlingDuration
+            maskSpring.fromValue = localPreviousPath
+            maskSpring.toValue = localPath
+            pulseMask.add(maskSpring, forKey: "pathSpring")
         }
 
-        let coreColor = resolvedTint.blended(withFraction: isDark ? 0.25 : 0.15, of: .white) ?? resolvedTint
-        let headColor = resolvedTint.blended(withFraction: isDark ? 0.72 : 0.58, of: .white) ?? resolvedTint
-        pulse.colors = [
-            resolvedTint.withAlphaComponent(0.0).cgColor,
-            resolvedTint.withAlphaComponent(0.42).cgColor,
-            coreColor.cgColor,
-            headColor.cgColor,
-            headColor.withAlphaComponent(0.95).cgColor
-        ]
-        pulse.locations = [0.0, 0.35, 0.72, 0.92, 1.0]
+        if pulseColorChanged {
+            let coreColor = resolvedTint.blended(withFraction: isDark ? 0.25 : 0.15, of: .white) ?? resolvedTint
+            let headColor = resolvedTint.blended(withFraction: isDark ? 0.72 : 0.58, of: .white) ?? resolvedTint
+            pulse.colors = [
+                resolvedTint.withAlphaComponent(0.0).cgColor,
+                resolvedTint.withAlphaComponent(0.42).cgColor,
+                coreColor.cgColor,
+                headColor.cgColor,
+                headColor.withAlphaComponent(0.95).cgColor
+            ]
+            appliedIsDark = isDark
+        }
 
-        guard shouldAnimateFlow else {
+        guard shouldAnimateFlow, let localPath = appliedLocalPath else {
             pulse.removeAllAnimations()
             pulses.isHidden = true
             animatedRoute = nil
@@ -537,7 +660,9 @@ private final class FlowLinkLayer: CALayer {
         setSpeed(FlowDynamics.pointsPerSecond(for: link.watts) / Self.referenceSpeed)
         // Width-only changes reshape the comet in place; the travel animation is
         // re-added only when the route actually changed (or isn't running).
-        updatePulseGeometry(width: width)
+        if widthChanged {
+            updatePulseGeometry(width: width)
+        }
         if animatedRoute != link.route || pulse.animation(forKey: "flow") == nil {
             if routeChanged {
                 // Comets hop to the new path while dipped out of view.
@@ -547,7 +672,7 @@ private final class FlowLinkLayer: CALayer {
                 dip.duration = 0.6
                 pulses.add(dip, forKey: "routeDip")
             }
-            animate(along: path, route: link.route, width: width)
+            animate(along: localPath, route: link.route, width: width)
         }
     }
 
@@ -557,11 +682,12 @@ private final class FlowLinkLayer: CALayer {
         isDark: Bool
     ) -> NSColor {
         guard isActive, !isDark else { return color }
+        guard let rgb = color.usingColorSpace(.sRGB) else { return color }
         var hue: CGFloat = 0
         var saturation: CGFloat = 0
         var brightness: CGFloat = 0
         var alpha: CGFloat = 0
-        color.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
+        rgb.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
         // Preserve exact semantic hue while keeping light-mode energy conduits radiant rather than muddy.
         let liftedBrightness = min(0.84, max(brightness, 0.74))
         let refinedSaturation = min(1.0, max(saturation, 0.78))
@@ -570,7 +696,7 @@ private final class FlowLinkLayer: CALayer {
             saturation: refinedSaturation,
             brightness: liftedBrightness,
             alpha: alpha
-        ).usingColorSpace(.sRGB) ?? color
+        ).usingColorSpace(.sRGB) ?? rgb
     }
 
     @MainActor
@@ -640,6 +766,7 @@ private final class FlowLinkLayer: CALayer {
     /// Changes the clock rate without moving the comets.
     private func setSpeed(_ speed: Double) {
         let target = Float(speed)
+        guard target.isFinite, target > 0 else { return }
         guard abs(pulses.speed - target) / target > 0.06 else { return }
         let now = CACurrentMediaTime()
         let local = pulses.convertTime(now, from: nil)

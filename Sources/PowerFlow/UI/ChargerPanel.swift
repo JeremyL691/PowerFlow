@@ -2,6 +2,8 @@ import SwiftUI
 
 /// Charger detail tab: connected adapter metering, PD profiles and standby adapters.
 struct ChargerPanel: View {
+    private static let posixLocale = Locale(identifier: "en_US_POSIX")
+
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
@@ -27,7 +29,8 @@ struct ChargerPanel: View {
                         .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
                         .lineLimit(1)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 24)
 
                 ForEach(snapshot.standbyAdapters) { standby in
                     standbyRow(standby)
@@ -41,7 +44,7 @@ struct ChargerPanel: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .center, spacing: 14) {
                 GaugeRing(
-                    fraction: ratedWatts > 0.5 ? snapshot.adapterInputPowerW / ratedWatts : 0,
+                    fraction: ratedWatts.isFinite && ratedWatts > 0.5 ? snapshot.adapterInputPowerW / ratedWatts : 0,
                     tint: blue,
                     lineWidth: 6.5,
                     isVisible: isVisible
@@ -54,7 +57,7 @@ struct ChargerPanel: View {
                             valueColor: PowerFlowTheme.primaryValue(for: colorScheme, contrast: colorSchemeContrast),
                             unitColor: PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
                         )
-                        if ratedWatts > 0.5 {
+                        if ratedWatts.isFinite, ratedWatts > 0.5 {
                             Text("/ \(Int(ratedWatts.rounded())) W")
                                 .font(PowerFlowTheme.Typography.captionFloor)
                                 .monospacedDigit()
@@ -80,7 +83,7 @@ struct ChargerPanel: View {
                         HStack(spacing: 3.5) {
                             Image(systemName: PowerFlowTheme.portSymbol(for: adapter?.portKind ?? .unknown))
                                 .font(.system(size: 10, weight: .semibold))
-                            Text(adapter?.portLabel ?? L10n.string(.portUnknown, language: language))
+                            Text(adapter.map { localizedAdapterText($0.portLabel) } ?? L10n.string(.portUnknown, language: language))
                                 .font(PowerFlowTheme.Typography.captionFloor)
                                 .fontWeight(.semibold)
                                 .lineLimit(1)
@@ -97,7 +100,7 @@ struct ChargerPanel: View {
                         label: L10n.string(.current, language: language),
                         value: ofRated(
                             PowerFormatters.amps(snapshot.adapterInputCurrentA),
-                            rated: ratedCurrent > 0.05 ? PowerFormatters.amps(ratedCurrent) : nil
+                            rated: ratedCurrent.isFinite && ratedCurrent > 0.05 ? PowerFormatters.amps(ratedCurrent) : nil
                         )
                     )
                     KeyValueRow(
@@ -130,10 +133,22 @@ struct ChargerPanel: View {
     private var ratedCurrent: Double { adapter?.ratedCurrentA ?? 0 }
 
     private var headline: String {
-        let name = adapter?.name?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? adapter?.description?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = (adapter?.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? adapter?.description?.trimmingCharacters(in: .whitespacesAndNewlines))
+            .map(localizedAdapterText)
         let maker = adapter?.manufacturer?.trimmingCharacters(in: .whitespacesAndNewlines)
         return [name, maker].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    private func localizedAdapterText(_ raw: String) -> String {
+        switch raw {
+        case "Power Adapter":
+            return L10n.string(.powerAdapter, language: language)
+        case "External Display":
+            return L10n.string(.externalDisplay, language: language)
+        default:
+            return raw
+        }
     }
 
     private func ofRated(_ value: String, rated: String?) -> String {
@@ -142,7 +157,7 @@ struct ChargerPanel: View {
 
     private func profileChips(_ profiles: [USBPDProfile]) -> some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 78), spacing: 6)], alignment: .leading, spacing: 6) {
-            ForEach(profiles) { profile in
+            ForEach(Array(profiles.enumerated()), id: \.offset) { _, profile in
                 let isActive = profile.isActive || profile.index == adapter?.activePDProfileIndex
                 Text("\(compact(profile.maxVoltageV, "V"))/\(compact(profile.maxCurrentA, "A"))")
                     .font(PowerFlowTheme.Typography.monoCaptionFloor)
@@ -182,25 +197,26 @@ struct ChargerPanel: View {
     }
 
     private func compact(_ value: Double, _ unit: String) -> String {
-        abs(value - value.rounded()) < 0.05
+        guard value.isFinite else { return "—\(unit)" }
+        return abs(value - value.rounded()) < 0.05
             ? "\(Int(value.rounded()))\(unit)"
-            : String(format: "%.2f%@", value, unit)
+            : String(format: "%.2f%@", locale: Self.posixLocale, value, unit)
     }
 
     private func standbyRow(_ standby: AdapterSourceInfo) -> some View {
         HStack(spacing: 6) {
             PowerFlowChip(
                 icon: "pause.circle",
-                text: "\(L10n.string(.standby, language: language)) · \(standby.portLabel)",
+                text: "\(L10n.string(.standby, language: language)) · \(localizedAdapterText(standby.portLabel))",
                 tint: PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
             )
-            Text(standby.connectedDeviceName ?? standby.name ?? L10n.string(.powerAdapter, language: language))
+            Text((standby.connectedDeviceName ?? standby.name).map(localizedAdapterText) ?? L10n.string(.powerAdapter, language: language))
                 .font(PowerFlowTheme.Typography.captionFloor)
                 .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 4)
-            if standby.ratedWatts > 0.5 {
+            if standby.ratedWatts.isFinite, standby.ratedWatts > 0.5 {
                 Text("\(Int(standby.ratedWatts.rounded())) W")
                     .font(PowerFlowTheme.Typography.captionFloor)
                     .fontWeight(.medium)

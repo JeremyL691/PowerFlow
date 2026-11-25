@@ -11,16 +11,30 @@ final class BatteryIconRendererTests: XCTestCase {
         isCharging: Bool = false,
         isLowBatteryWarning: Bool = false,
         isLowPowerModeEnabled: Bool = false,
-        phase: PowerConnectionPhase? = nil
+        phase: PowerConnectionPhase? = nil,
+        flowMode: PowerFlowMode? = nil,
+        totalSystemLoadW: Double = 0,
+        adapterInputPowerW: Double = 0,
+        batteryPowerW: Double = 0,
+        outboundPorts: [OutboundPortPower] = [],
+        totalOutboundPowerW: Double = 0
     ) -> PowerSnapshot {
-        PowerSnapshot(
+        let resolvedPhase = phase ?? (isExternalConnected ? .onAC : .onBattery)
+        let resolvedFlowMode = flowMode ?? (isExternalConnected ? .adapterBypass : .batteryOnly)
+        return PowerSnapshot(
             isDataAvailable: true,
-            connectionPhase: phase ?? (isExternalConnected ? .onAC : .onBattery),
+            connectionPhase: resolvedPhase,
+            flowMode: resolvedFlowMode,
             batteryPercent: percent,
             isExternalConnected: isExternalConnected,
             isCharging: isCharging,
             isLowBatteryWarning: isLowBatteryWarning,
-            isLowPowerModeEnabled: isLowPowerModeEnabled
+            isLowPowerModeEnabled: isLowPowerModeEnabled,
+            batteryPowerW: batteryPowerW,
+            totalSystemLoadW: totalSystemLoadW,
+            adapterInputPowerW: adapterInputPowerW,
+            outboundPorts: outboundPorts,
+            totalOutboundPowerW: totalOutboundPowerW
         )
     }
 
@@ -87,6 +101,103 @@ final class BatteryIconRendererTests: XCTestCase {
         XCTAssertEqual(title(.iconAndWatts, .solid), "0W")
         XCTAssertEqual(title(.iconPercentageAndWatts, .solid), "0W")
         XCTAssertEqual(title(.iconPercentageAndWatts, .outlined), "64% · 0W")
+
+        let highWattAC = snapshot(percent: 80, isExternalConnected: true, adapterInputPowerW: 24.3)
+        XCTAssertEqual(
+            StatusItemController.makeMenuBarTitle(snapshot: highWattAC, mode: .iconPercentageAndWatts, style: .outlined),
+            "80% · 24W"
+        )
+        let lowWattAC = snapshot(percent: 80, isExternalConnected: true, adapterInputPowerW: 8.4)
+        XCTAssertEqual(
+            StatusItemController.makeMenuBarTitle(snapshot: lowWattAC, mode: .iconAndWatts, style: .solid),
+            "8.4W"
+        )
+        XCTAssertEqual(
+            StatusItemController.makeMenuBarTitle(snapshot: .empty, mode: .iconPercentageAndWatts, style: .outlined),
+            "--% · --W"
+        )
+    }
+
+    @MainActor
+    func testTooltipPrecisionSuppressesSubWattJitterAboveTenWatts() {
+        let englishSettings = PowerSettings(appLanguage: .english)
+
+        let acLow = snapshot(percent: 80, isExternalConnected: true, adapterInputPowerW: 24.1)
+        let acHigh = snapshot(percent: 80, isExternalConnected: true, adapterInputPowerW: 24.4)
+        let acLowTooltip = StatusItemController.makeTooltip(snapshot: acLow, settings: englishSettings)
+        let acHighTooltip = StatusItemController.makeTooltip(snapshot: acHigh, settings: englishSettings)
+        XCTAssertEqual(acLowTooltip, acHighTooltip)
+        XCTAssertEqual(acLowTooltip, "PowerFlow · 80% · Power Adapter (24W)")
+
+        let battLow = snapshot(percent: 62, totalSystemLoadW: 18.1)
+        let battHigh = snapshot(percent: 62, totalSystemLoadW: 18.4)
+        XCTAssertEqual(
+            StatusItemController.makeTooltip(snapshot: battLow, settings: englishSettings),
+            StatusItemController.makeTooltip(snapshot: battHigh, settings: englishSettings)
+        )
+        XCTAssertEqual(
+            StatusItemController.makeTooltip(snapshot: battLow, settings: englishSettings),
+            "PowerFlow · 62% · Battery (18W)"
+        )
+
+        let outboundPort = OutboundPortPower(
+            id: "port-1",
+            portIndex: 1,
+            portLabel: "USB-C 1",
+            currentA: 2.4,
+            voltageV: 5.0,
+            powerW: 12.1
+        )
+        let outLow = snapshot(
+            percent: 80,
+            isExternalConnected: true,
+            adapterInputPowerW: 36.1,
+            outboundPorts: [outboundPort],
+            totalOutboundPowerW: 12.1
+        )
+        let outHigh = snapshot(
+            percent: 80,
+            isExternalConnected: true,
+            adapterInputPowerW: 36.4,
+            outboundPorts: [outboundPort],
+            totalOutboundPowerW: 12.4
+        )
+        XCTAssertEqual(
+            StatusItemController.makeTooltip(snapshot: outLow, settings: englishSettings),
+            StatusItemController.makeTooltip(snapshot: outHigh, settings: englishSettings)
+        )
+        XCTAssertTrue(
+            StatusItemController.makeTooltip(snapshot: outLow, settings: englishSettings).contains("Out: 12W")
+        )
+
+        // Sub-10W retains 0.1W compact precision, matching compactWatts.
+        let subTenA = snapshot(percent: 80, isExternalConnected: true, adapterInputPowerW: 8.2)
+        let subTenB = snapshot(percent: 80, isExternalConnected: true, adapterInputPowerW: 8.3)
+        XCTAssertEqual(
+            StatusItemController.makeTooltip(snapshot: subTenA, settings: englishSettings),
+            "PowerFlow · 80% · Power Adapter (8.2W)"
+        )
+        XCTAssertEqual(
+            StatusItemController.makeTooltip(snapshot: subTenB, settings: englishSettings),
+            "PowerFlow · 80% · Power Adapter (8.3W)"
+        )
+    }
+
+    @MainActor
+    func testContextMenuRoutingDoesNotHijackVoiceOverSpace() {
+        XCTAssertTrue(StatusItemController.shouldOpenContextMenu(eventType: .rightMouseDown, modifierFlags: []))
+        XCTAssertTrue(StatusItemController.shouldOpenContextMenu(eventType: .rightMouseUp, modifierFlags: []))
+        XCTAssertTrue(StatusItemController.shouldOpenContextMenu(eventType: .leftMouseDown, modifierFlags: [.control]))
+        XCTAssertTrue(StatusItemController.shouldOpenContextMenu(eventType: .leftMouseUp, modifierFlags: [.control]))
+        XCTAssertFalse(StatusItemController.shouldOpenContextMenu(eventType: .leftMouseDown, modifierFlags: []))
+        XCTAssertFalse(StatusItemController.shouldOpenContextMenu(eventType: .leftMouseUp, modifierFlags: []))
+        // VoiceOver VO+Space arrives as a key event with Control+Option modifiers.
+        XCTAssertFalse(
+            StatusItemController.shouldOpenContextMenu(eventType: .keyDown, modifierFlags: [.control, .option])
+        )
+        XCTAssertFalse(
+            StatusItemController.shouldOpenContextMenu(eventType: .keyUp, modifierFlags: [.control, .option])
+        )
     }
 
     // MARK: - Rendering
@@ -100,6 +211,7 @@ final class BatteryIconRendererTests: XCTestCase {
         XCTAssertEqual(BatteryIconDrawing.fillWidth(percent: 150, available: 19), 19)
     }
 
+    @MainActor
     func testTemplateRenderingIsLimitedToUncoloredStates() {
         for (state, isTemplate) in [
             (BatteryIconState.neutral, true), (.unavailable, true), (.lowPower, false), (.critical, false)
@@ -109,6 +221,7 @@ final class BatteryIconRendererTests: XCTestCase {
         }
     }
 
+    @MainActor
     func testRenderCachesEquivalentSpecs() {
         func render(_ percent: Int, dark: Bool, showsPercent: Bool = false, style: BatteryIconStyle = .solid) -> NSImage {
             NativeBatteryIconRenderer.render(
@@ -128,6 +241,7 @@ final class BatteryIconRendererTests: XCTestCase {
         )
     }
 
+    @MainActor
     func testSolidTrackAndFillOpacity() throws {
         let bitmap = try rasterize(.init(percent: 52, state: .neutral, isDarkMenuBar: true, style: .solid))
         XCTAssertEqual(try alpha(bitmap, x: 4, y: 8), 0.847, accuracy: 0.02)
@@ -136,6 +250,7 @@ final class BatteryIconRendererTests: XCTestCase {
         XCTAssertEqual(try alpha(bitmap, x: 24.25, y: 8), 0.6, accuracy: 0.05)
     }
 
+    @MainActor
     func testSolidPercentageIsCutOutOfTheShell() throws {
         let plain = try rasterize(.init(percent: 100, state: .neutral, isDarkMenuBar: true, style: .solid))
         let labelled = try rasterize(
@@ -144,6 +259,7 @@ final class BatteryIconRendererTests: XCTestCase {
         XCTAssertGreaterThan(transparentPixels(labelled), transparentPixels(plain) + 60)
     }
 
+    @MainActor
     func testOutlinedShellKeepsAGapBetweenOutlineAndFill() throws {
         let bitmap = try rasterize(.init(percent: 100, state: .neutral, isDarkMenuBar: true, style: .outlined))
         XCTAssertEqual(try alpha(bitmap, x: 0.25, y: 8), 0.5, accuracy: 0.03)
@@ -151,12 +267,14 @@ final class BatteryIconRendererTests: XCTestCase {
         XCTAssertEqual(try alpha(bitmap, x: 11.5, y: 8), 1, accuracy: 0.02)
     }
 
+    @MainActor
     func testOutlinedChargeStopsAtTheFillWidth() throws {
         let bitmap = try rasterize(.init(percent: 50, state: .neutral, isDarkMenuBar: true, style: .outlined))
         XCTAssertEqual(try alpha(bitmap, x: 10, y: 8), 1, accuracy: 0.02)
         XCTAssertEqual(try alpha(bitmap, x: 14, y: 8), 0, accuracy: 0.02)
     }
 
+    @MainActor
     func testOutlinedOverlayIsSeparatedFromTheChargeByAGap() throws {
         for overlay in [BatteryOverlay.chargingBolt, .pluggedInPlug] {
             let marked = try rasterize(.init(percent: 100, state: .neutral, overlay: overlay, isDarkMenuBar: true, style: .outlined))
@@ -169,6 +287,7 @@ final class BatteryIconRendererTests: XCTestCase {
         }
     }
 
+    @MainActor
     func testColoredStatesUseSystemColors() throws {
         let yellow = try color(rasterize(.init(percent: 80, state: .lowPower, isDarkMenuBar: true, style: .solid)))
         XCTAssertGreaterThan(yellow.redComponent, 0.9)
@@ -180,6 +299,7 @@ final class BatteryIconRendererTests: XCTestCase {
         XCTAssertLessThan(red.greenComponent, 0.45)
     }
 
+    @MainActor
     func testEveryStateRendersWithoutSystemArtwork() throws {
         for style in [BatteryIconStyle.solid, .outlined] {
             for overlay in [BatteryOverlay.none, .chargingBolt, .pluggedInPlug] {
@@ -199,10 +319,49 @@ final class BatteryIconRendererTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testDrawingBindsGraphicsContextWhenCurrentContextIsNil() throws {
+        let width = Int(BatteryIconDrawing.canvasSize.width) * Self.scale
+        let height = Int(BatteryIconDrawing.canvasSize.height) * Self.scale
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        let ctx = try XCTUnwrap(
+            CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            )
+        )
+        ctx.scaleBy(x: CGFloat(Self.scale), y: CGFloat(Self.scale))
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = nil
+        defer { NSGraphicsContext.restoreGraphicsState() }
+
+        let spec = BatteryIconRenderSpec(
+            percent: 75,
+            state: .neutral,
+            overlay: .chargingBolt,
+            showsPercent: true,
+            isDarkMenuBar: true,
+            style: .solid
+        )
+        BatteryIconDrawing(spec: spec, artwork: .unavailable).draw(in: ctx)
+
+        let cgImage = try XCTUnwrap(ctx.makeImage())
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        XCTAssertLessThan(transparentPixels(bitmap), bitmap.pixelsWide * bitmap.pixelsHigh)
+    }
+
     // MARK: - Helpers
 
     private static let scale = 4
 
+    @MainActor
     private func rasterize(
         _ spec: BatteryIconRenderSpec,
         artwork: SystemBatteryArtwork = .system

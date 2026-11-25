@@ -282,6 +282,10 @@ struct CopyableSerialRow: View {
             }
             .animation(reduceMotion ? nil : PowerFlowTheme.Motion.value, value: isCopied)
             .help(L10n.tr("Click to copy serial number", zh: "点击复制序列号", language: language))
+            .accessibilityLabel(
+                "\(label), \(isCopied ? L10n.tr("Copied", zh: "已复制", language: language) : PowerFormatters.maskSerial(serial, masked: isMasked))"
+            )
+            .accessibilityHint(L10n.tr("Click to copy serial number", zh: "点击复制序列号", language: language))
         }
         .task(id: isCopied) {
             guard isCopied else { return }
@@ -399,6 +403,7 @@ final class LivePulseNSView: NSView {
         wantsLayer = true
         rippleLayer.fillColor = nil
         rippleLayer.lineWidth = 1
+        rippleLayer.isHidden = true
         layer?.addSublayer(rippleLayer)
         layer?.addSublayer(dotLayer)
     }
@@ -412,11 +417,17 @@ final class LivePulseNSView: NSView {
         nil
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTintColor()
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
             rippleLayer.removeAllAnimations()
         } else {
+            applyTintColor()
             syncRipple()
         }
     }
@@ -439,21 +450,31 @@ final class LivePulseNSView: NSView {
     }
 
     func apply(tint newTint: NSColor, isPulsing newPulsing: Bool) {
-        let changed = newTint != tint || newPulsing != isPulsing
+        let tintChanged = newTint != tint
+        let pulsingChanged = newPulsing != isPulsing
+        guard tintChanged || pulsingChanged else { return }
+
         tint = newTint
         isPulsing = newPulsing
 
+        if tintChanged {
+            applyTintColor()
+        }
+        if pulsingChanged {
+            syncRipple()
+        }
+    }
+
+    private func applyTintColor() {
+        guard let tint else { return }
         effectiveAppearance.performAsCurrentDrawingAppearance {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            let resolved = (newTint.usingColorSpace(.sRGB) ?? newTint).cgColor
+            let resolved = (tint.usingColorSpace(.sRGB) ?? tint).cgColor
             dotLayer.fillColor = resolved
             rippleLayer.strokeColor = resolved
             CATransaction.commit()
         }
-
-        guard changed else { return }
-        syncRipple()
     }
 
     private func syncRipple() {
@@ -478,7 +499,7 @@ final class LivePulseNSView: NSView {
         group.repeatCount = .infinity
         group.timingFunction = CAMediaTimingFunction(name: .easeOut)
         group.isRemovedOnCompletion = false
-        group.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+        group.preferredFrameRateRange = CAFrameRateRange(minimum: 20, maximum: 30, preferred: 30)
         rippleLayer.add(group, forKey: "ripple")
     }
 }

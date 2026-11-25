@@ -10,28 +10,54 @@ final class OutboundPortGate: @unchecked Sendable {
     static let closeWatts = 0.11
     static let holdSeconds: TimeInterval = 3
 
-    private let lock = NSLock()
-    /// When each open port last drew at least `closeWatts`.
-    private var lastDraw: [Int: Date] = [:]
+    private struct OpenPortState {
+        var lastDraw: Date
+        var lastPort: OutboundPortPower
+    }
 
-    func filter(_ ports: [OutboundPortPower], at now: Date) -> [OutboundPortPower] {
+    private let lock = NSLock()
+    /// When each open port last drew at least `closeWatts`, plus its last reading.
+    private var openPorts: [Int: OpenPortState] = [:]
+
+    func filter(
+        _ ports: [OutboundPortPower],
+        at now: Date,
+        hasLivePortOutputs: Bool = true
+    ) -> [OutboundPortPower] {
         lock.lock()
         defer { lock.unlock() }
 
-        var updated: [Int: Date] = [:]
-        let kept = ports.filter { port in
-            let previous = lastDraw[port.portIndex]
+        var updated: [Int: OpenPortState] = [:]
+        var seenIndices = Set<Int>()
+        var kept: [OutboundPortPower] = []
+
+        for port in ports {
+            seenIndices.insert(port.portIndex)
+            let previous = openPorts[port.portIndex]
             if port.powerW >= (previous == nil ? Self.openWatts : Self.closeWatts) {
-                updated[port.portIndex] = now
-                return true
+                updated[port.portIndex] = OpenPortState(lastDraw: now, lastPort: port)
+                kept.append(port)
+                continue
             }
-            guard let previous, (0..<Self.holdSeconds).contains(now.timeIntervalSince(previous)) else {
-                return false
+            guard let previous, (0..<Self.holdSeconds).contains(now.timeIntervalSince(previous.lastDraw)) else {
+                continue
             }
-            updated[port.portIndex] = previous
-            return true
+            updated[port.portIndex] = OpenPortState(lastDraw: previous.lastDraw, lastPort: port)
+            kept.append(port)
         }
-        lastDraw = updated
+
+        if !hasLivePortOutputs {
+            for (portIndex, previous) in openPorts where !seenIndices.contains(portIndex) {
+                guard (0..<Self.holdSeconds).contains(now.timeIntervalSince(previous.lastDraw)) else {
+                    continue
+                }
+                updated[portIndex] = previous
+                kept.append(previous.lastPort)
+            }
+            kept.sort { $0.portIndex < $1.portIndex }
+        }
+
+        openPorts = updated
         return kept
     }
 }

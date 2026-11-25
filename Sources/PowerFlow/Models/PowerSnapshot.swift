@@ -602,11 +602,14 @@ struct PowerSnapshot: Sendable, Equatable, Hashable, Codable {
     )
 
     var isEffectivelyOnAC: Bool {
-        isExternalConnected || connectionPhase != .onBattery
+        isExternalConnected || connectionPhase == .connectingAC
     }
 
     var isAdapterSupplyingPower: Bool {
-        isEffectivelyOnAC && flowMode != .batteryWhilePluggedIn
+        isEffectivelyOnAC
+            && flowMode != .batteryWhilePluggedIn
+            && flowMode != .batteryOnly
+            && flowMode != .unknown
     }
 
     var isBatteryCharging: Bool {

@@ -26,7 +26,8 @@ struct OutputPanel: View {
                     .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
                     .lineLimit(1)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 24)
         } else {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 4) {
@@ -77,7 +78,7 @@ private struct OutboundPortRow: View {
     var body: some View {
         HStack(spacing: 10) {
             GaugeRing(
-                fraction: port.maxPDWatts > 0.5 ? port.powerW / port.maxPDWatts : 0,
+                fraction: port.maxPDWatts.isFinite && port.maxPDWatts > 0.5 ? port.powerW / port.maxPDWatts : 0,
                 tint: teal,
                 lineWidth: 3.5,
                 isVisible: isVisible
@@ -115,7 +116,7 @@ private struct OutboundPortRow: View {
                     valueColor: teal,
                     unitColor: PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
                 )
-                if port.maxPDWatts > 0.5 {
+                if port.maxPDWatts.isFinite, port.maxPDWatts > 0.5 {
                     Text("/ \(Int(port.maxPDWatts.rounded())) W")
                         .font(PowerFlowTheme.Typography.captionFloor)
                         .monospacedDigit()

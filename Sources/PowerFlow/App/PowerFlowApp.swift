@@ -11,7 +11,7 @@ struct PowerFlowApp: App {
         }
         .commands {
             CommandGroup(replacing: .appSettings) {
-                Button(L10n.string(.settings)) {
+                Button(appDelegate.settingsMenuTitle) {
                     appDelegate.openSettings()
                 }
                 .keyboardShortcut(",", modifiers: .command)

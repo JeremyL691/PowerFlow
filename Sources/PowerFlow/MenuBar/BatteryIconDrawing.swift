@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 
 /// Draws both battery designs in a shared `26 × 16 pt` canvas with a `23 × 12 pt` shell.
+@MainActor
 struct BatteryIconDrawing {
-    static let canvasSize = NSSize(width: 26, height: 16)
+    nonisolated static let canvasSize = NSSize(width: 26, height: 16)
 
     private static let shell = CGRect(x: 0, y: 2, width: 23, height: 12)
     private static let capOrigin = CGPoint(x: 24, y: 2)
@@ -14,7 +15,7 @@ struct BatteryIconDrawing {
     private static let solidFillAlpha: CGFloat = 0.847
     private static let solidTrackAlpha: CGFloat = 0.549
     private static let solidTintedTrackAlpha: CGFloat = 0.5
-    private static let minimumFillWidth: CGFloat = 2
+    private nonisolated static let minimumFillWidth: CGFloat = 2
 
     // Outlined
     private static let outlineAlpha: CGFloat = 0.5
@@ -28,6 +29,13 @@ struct BatteryIconDrawing {
     let artwork: SystemBatteryArtwork
 
     func draw(in ctx: CGContext) {
+        let isFlipped = NSGraphicsContext.current?.cgContext === ctx
+            ? (NSGraphicsContext.current?.isFlipped ?? false)
+            : false
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: isFlipped)
+        defer { NSGraphicsContext.restoreGraphicsState() }
+
         ctx.saveGState()
         ctx.beginTransparencyLayer(auxiliaryInfo: nil)
         switch spec.style {
@@ -41,7 +49,7 @@ struct BatteryIconDrawing {
     }
 
     /// Charge width in whole points, rounded the way the system rounds it.
-    static func fillWidth(percent: Int, available: CGFloat) -> CGFloat {
+    nonisolated static func fillWidth(percent: Int, available: CGFloat) -> CGFloat {
         let clamped = CGFloat(min(max(percent, 0), 100))
         return max(minimumFillWidth, (available * clamped / 100).rounded())
     }

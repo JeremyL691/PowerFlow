@@ -15,26 +15,32 @@ struct MenuBarPopoverView: View {
     let quitApp: () -> Void
 
     @State private var hasAppeared = false
+    @State private var contentHeight: CGFloat = 0
     @AppStorage("popoverDetailTab") private var detailTab: PopoverDetailTab = .battery
 
     private var snapshot: PowerSnapshot { monitor.snapshot }
     private var settings: PowerSettings { monitor.settingsStore.settings }
     private var language: AppLanguage { settings.appLanguage }
+    private var needsScrolling: Bool { contentHeight > maxHeight + 0.5 }
 
     var body: some View {
-        ViewThatFits(in: .vertical) {
-            sections
-            ScrollView(.vertical) {
-                sections
+        Group {
+            if needsScrolling {
+                ScrollView(.vertical) {
+                    measuredSections
+                }
+                .scrollIndicators(.never)
+                .frame(height: maxHeight)
+            } else {
+                measuredSections
             }
-            .scrollIndicators(.never)
         }
         .frame(width: Self.width)
-        .frame(maxHeight: maxHeight)
         .background(alignment: .topLeading) {
             ambientAura
         }
         .clipped()
+        .environment(\.locale, PowerFlowTheme.locale(for: language))
         .onAppear {
             hasAppeared = true
         }
@@ -43,6 +49,19 @@ struct MenuBarPopoverView: View {
                 hasAppeared = true
             }
         }
+    }
+
+    private var measuredSections: some View {
+        sections
+            .fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { newHeight in
+                guard newHeight.isFinite, newHeight > 0 else { return }
+                if abs(contentHeight - newHeight) > 0.5 {
+                    contentHeight = newHeight
+                }
+            }
     }
 
     private var ambientAura: some View {
@@ -80,7 +99,13 @@ struct MenuBarPopoverView: View {
             vitals
                 .powerFlowReveal(index: 2, hasAppeared: hasAppeared, reduceMotion: reduceMotion)
 
-            DetailTabBar(selection: $detailTab, snapshot: snapshot, language: language)
+            DetailTabBar(
+                selection: $detailTab,
+                isOnAC: snapshot.isEffectivelyOnAC,
+                ratedAdapterWatts: snapshot.activeAdapter?.ratedWatts ?? 0,
+                outboundPortCount: snapshot.outboundPorts.count,
+                language: language
+            )
                 .powerFlowReveal(index: 3, hasAppeared: hasAppeared, reduceMotion: reduceMotion)
 
             detailPanel
@@ -282,7 +307,7 @@ struct MenuBarPopoverView: View {
         guard snapshot.isDataAvailable else {
             return PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
         }
-        if snapshot.isLowBatteryWarning || snapshot.atCriticalLevel {
+        if !snapshot.isEffectivelyOnAC && (snapshot.isLowBatteryWarning || snapshot.atCriticalLevel) {
             return PowerFlowTheme.warningRed(for: colorScheme, contrast: colorSchemeContrast)
         }
         return PowerFlowTheme.themeBlue(for: colorScheme, contrast: colorSchemeContrast)
@@ -421,7 +446,9 @@ struct MenuBarPopoverView: View {
         case .serviceRecommended:
             return PowerFlowTheme.warningRed(for: colorScheme, contrast: colorSchemeContrast)
         case .normal:
-            return (snapshot.health.realHealthPercent ?? 100) < 80
+            let effectiveHealth = snapshot.health.realHealthPercent
+                ?? snapshot.health.macOSCapacityPercent.map(Double.init)
+            return (effectiveHealth ?? 100) < 80
                 ? PowerFlowTheme.dischargeAmber(for: colorScheme, contrast: colorSchemeContrast)
                 : PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
         case .unknown:
@@ -432,43 +459,22 @@ struct MenuBarPopoverView: View {
     // MARK: - Detail Panel
 
     private var detailPanel: some View {
-        ZStack(alignment: .topLeading) {
-            panelSlot(.battery) {
+        Group {
+            switch detailTab {
+            case .battery:
                 BatteryPanel(snapshot: snapshot, settings: settings)
-            }
-            panelSlot(.charger) {
-                ChargerPanel(snapshot: snapshot, settings: settings, isVisible: detailTab == .charger)
-            }
-            panelSlot(.output) {
-                OutputPanel(snapshot: snapshot, language: language, isVisible: detailTab == .output)
+            case .charger:
+                ChargerPanel(snapshot: snapshot, settings: settings, isVisible: true)
+            case .output:
+                OutputPanel(snapshot: snapshot, language: language, isVisible: true)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .id(detailTab)
+        .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 4)))
         .animation(reduceMotion ? PowerFlowTheme.Motion.reducedFade : PowerFlowTheme.Motion.tab, value: detailTab)
         .padding(12)
         .powerFlowSurface(.tile(), cornerRadius: 14)
-    }
-
-    private func panelSlot<Content: View>(
-        _ tab: PopoverDetailTab,
-        @ViewBuilder _ content: () -> Content
-    ) -> some View {
-        let isSelected = detailTab == tab
-        let all = PopoverDetailTab.allCases
-        let selectedIndex = all.firstIndex(of: detailTab) ?? 0
-        let ownIndex = all.firstIndex(of: tab) ?? 0
-        let direction: CGFloat = ownIndex < selectedIndex ? -10 : (ownIndex > selectedIndex ? 10 : 0)
-
-        return content()
-            .transaction { transaction in
-                if !isSelected {
-                    transaction.animation = nil
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .opacity(isSelected ? 1 : 0)
-            .offset(x: reduceMotion || isSelected ? 0 : direction)
-            .allowsHitTesting(isSelected)
-            .accessibilityHidden(!isSelected)
     }
 
     // MARK: - Footer

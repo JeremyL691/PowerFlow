@@ -495,7 +495,8 @@ final class PowerMonitorTests: XCTestCase {
             ioPortReader: mockPorts,
             smcReader: mockSMC,
             notifier: mockNotifier,
-            resolver: makeIsolatedResolver()
+            resolver: makeIsolatedResolver(),
+            isDisplayAsleepProvider: { false }
         )
         defer { monitor.stop() }
 
@@ -659,7 +660,8 @@ final class PowerMonitorTests: XCTestCase {
             ioPortReader: mockPorts,
             smcReader: mockSMC,
             notifier: mockNotifier,
-            resolver: makeIsolatedResolver()
+            resolver: makeIsolatedResolver(),
+            isDisplayAsleepProvider: { false }
         )
         defer { monitor.stop() }
 
@@ -781,7 +783,8 @@ final class PowerMonitorTests: XCTestCase {
             ioPortReader: mockPorts,
             smcReader: mockSMC,
             notifier: mockNotifier,
-            resolver: makeIsolatedResolver()
+            resolver: makeIsolatedResolver(),
+            isDisplayAsleepProvider: { false }
         )
         defer { monitor.stop() }
 
@@ -833,7 +836,8 @@ final class PowerMonitorTests: XCTestCase {
             ioPortReader: mockPorts,
             smcReader: mockSMC,
             notifier: mockNotifier,
-            resolver: makeIsolatedResolver()
+            resolver: makeIsolatedResolver(),
+            isDisplayAsleepProvider: { false }
         )
         defer { monitor.stop() }
 
@@ -1108,5 +1112,272 @@ final class PowerMonitorTests: XCTestCase {
         XCTAssertEqual(snap.physicalPorts[3].deviceName, "Demo Phone")
         XCTAssertEqual(snap.physicalPorts[3].powerW, 2.68, accuracy: 0.01)
         XCTAssertFalse(snap.physicalPorts[4].connectionActive)
+    }
+
+    // MARK: - 12. Split-Brain Suppression, Polarity Guardrails, Charge-Limit Holds & Fast Paths
+
+    func testUnplugDebounceSuppressesAdapterAndWallPower() {
+        let resolver = makeIsolatedResolver()
+        let adapter = RawAdapterEntry(
+            index: 0, name: "70W", manufacturer: "Apple", serialNumber: nil, model: nil,
+            description: "pd charger", watts: 70, voltageMV: 20_000, currentMA: 3_500, adapterID: 1001
+        )
+        let snap = resolver.resolve(
+            reading: makeReading(
+                currentCapacityPercent: 75,
+                isExternalConnected: false,
+                isCharging: false,
+                instantAmperageMA: -1_200,
+                telemetrySystemPowerInMW: 30_000,
+                telemetryWallEnergyEstimateMW: 33_000,
+                activeAdapter: adapter,
+                rawAdapters: [adapter]
+            ),
+            smc: SMCPowerSample(deliveryRateW: 30.0, systemTotalW: 15.0, batteryRateW: -15.0),
+            connectionPhase: .onAC,
+            isLowPowerModeEnabled: false,
+            isInTransition: true
+        )
+
+        XCTAssertEqual(snap.flowMode, .batteryOnly)
+        XCTAssertFalse(snap.isExternalConnected)
+        XCTAssertFalse(snap.isEffectivelyOnAC)
+        XCTAssertFalse(snap.isAdapterSupplyingPower)
+        XCTAssertNil(snap.activeAdapter)
+        XCTAssertTrue(snap.standbyAdapters.isEmpty)
+        XCTAssertEqual(snap.adapterInputPowerW, 0, accuracy: 0.001)
+        XCTAssertNil(snap.wallPowerEstimateW)
+    }
+
+    func testSMCPolarityCalibrationGuardsTransitionsRequiresThreeSamplesAndStopsUnsignedFlipFlop() {
+        let defaults = InMemoryUserDefaults()
+        let calibrator = SMCPolarityCalibrator(userDefaults: defaults, modelIdentifier: "TestGuardMac")
+        let resolver = PowerFlowResolver(polarityCalibrator: calibrator, chargeLimitProvider: { _ in .unlimited })
+
+        // First steady-state sample calibrates immediately to .normal (1 UserDefaults write).
+        _ = resolver.resolve(
+            reading: makeReading(isExternalConnected: false, isCharging: false, instantAmperageMA: -1_500),
+            smc: SMCPowerSample(systemTotalW: 18.0, batteryRateW: -18.0),
+            connectionPhase: .onBattery,
+            isLowPowerModeEnabled: false,
+            isInTransition: false
+        )
+        XCTAssertEqual(calibrator.currentPolarity, .normal)
+        XCTAssertEqual(defaults.writeCount, 1)
+
+        // Lagging positive PPBR during transition or with mismatched positive current must NOT flip polarity.
+        for _ in 0..<5 {
+            _ = resolver.resolve(
+                reading: makeReading(isExternalConnected: false, isCharging: false, instantAmperageMA: 1_500),
+                smc: SMCPowerSample(systemTotalW: 18.0, batteryRateW: 18.0),
+                connectionPhase: .onAC,
+                isLowPowerModeEnabled: false,
+                isInTransition: true
+            )
+        }
+        XCTAssertEqual(calibrator.currentPolarity, .normal)
+        XCTAssertEqual(defaults.writeCount, 1)
+
+        // Two opposite steady-state samples (< 3) must NOT flip a pre-existing stored polarity.
+        let storedDefaults = InMemoryUserDefaults()
+        storedDefaults.set(SMCBatteryPowerPolarity.inverted.rawValue, forKey: "com.powerflow.smc.ppbrPolarity.RepairMac")
+        let repairCalibrator = SMCPolarityCalibrator(userDefaults: storedDefaults, modelIdentifier: "RepairMac")
+        let initialWrites = storedDefaults.writeCount
+        _ = repairCalibrator.normalizeBatteryPower(rawPPBR: -15.0, isExternalConnected: false, isCharging: false)
+        _ = repairCalibrator.normalizeBatteryPower(rawPPBR: -15.0, isExternalConnected: false, isCharging: false)
+        XCTAssertEqual(repairCalibrator.currentPolarity, .inverted)
+        XCTAssertEqual(storedDefaults.writeCount, initialWrites)
+
+        // Third consecutive steady-state sample repairs corrupted stored polarity -> .normal.
+        _ = repairCalibrator.normalizeBatteryPower(rawPPBR: -15.0, isExternalConnected: false, isCharging: false)
+        XCTAssertEqual(repairCalibrator.currentPolarity, .normal)
+        XCTAssertEqual(storedDefaults.writeCount, initialWrites + 1)
+
+        // Unsigned-PPBR Mac: +15W while discharging AND +25W while charging -> detects flip-flop & stops writes!
+        let unsignedDefaults = InMemoryUserDefaults()
+        let unsignedCalibrator = SMCPolarityCalibrator(userDefaults: unsignedDefaults, modelIdentifier: "UnsignedMac")
+        let dischargeW = unsignedCalibrator.normalizeBatteryPower(rawPPBR: 15.0, isExternalConnected: false, isCharging: false)
+        XCTAssertEqual(dischargeW, -15.0, accuracy: 0.01)
+        XCTAssertEqual(unsignedDefaults.writeCount, 1)
+
+        for _ in 0..<3 {
+            _ = unsignedCalibrator.normalizeBatteryPower(rawPPBR: 25.0, isExternalConnected: true, isCharging: true)
+        }
+        XCTAssertTrue(unsignedCalibrator.isUnsignedMagnitudeDetected)
+        XCTAssertEqual(unsignedDefaults.writeCount, 1)
+
+        // Subsequent plug/unplug cycles never write UserDefaults again and return correct signs.
+        let steadyChargeW = unsignedCalibrator.normalizeBatteryPower(rawPPBR: 24.0, isExternalConnected: true, isCharging: true)
+        let steadyDischargeW = unsignedCalibrator.normalizeBatteryPower(rawPPBR: 14.0, isExternalConnected: false, isCharging: false)
+        XCTAssertEqual(steadyChargeW, 24.0, accuracy: 0.01)
+        XCTAssertEqual(steadyDischargeW, -14.0, accuracy: 0.01)
+        XCTAssertEqual(unsignedDefaults.writeCount, 1)
+    }
+
+    func testChargeLimitNeverFallsBackTo100PercentOSMinutesAndHoldReasonPriority() {
+        let alDente80 = BatteryChargeLimitInfo(limitPercent: 80, source: .alDente)
+        let resolver = makeIsolatedResolver(chargeLimit: alDente80)
+
+        // At 80% with 80% limit, estimator returns nil; must NOT fall back to 100%-targeted osMinutes (45).
+        let atLimitCharging = resolver.resolve(
+            reading: makeReading(
+                currentCapacityPercent: 80,
+                isExternalConnected: true,
+                isCharging: true,
+                timeRemainingMinutes: 45,
+                voltageMV: 12_800,
+                instantAmperageMA: 500,
+                rawMaxCapacityMAh: 6_000,
+                currentChargeMAh: 4_800
+            ),
+            smc: SMCPowerSample(deliveryRateW: 25.0, systemTotalW: 18.0, batteryRateW: 6.4),
+            connectionPhase: .onAC,
+            isLowPowerModeEnabled: false
+        )
+        XCTAssertNil(atLimitCharging.timeRemainingMinutes)
+
+        // Thermal protection bit at 80% overrides AlDente charge limit.
+        let thermalAtLimit = PowerFlowResolver.resolveChargingHoldReason(
+            effectiveOnAC: true,
+            flowMode: .adapterBypass,
+            isFullyCharged: false,
+            batteryPercent: 80,
+            chargeLimit: alDente80,
+            notChargingReason: 0x0000_0004,
+            slowChargingReason: nil
+        )
+        XCTAssertEqual(thermalAtLimit, "Thermal Protection")
+
+        // Charging hold bit at 40% (below 80% limit) reports Charging On Hold instead of blaming AlDente.
+        let holdBelowLimit = PowerFlowResolver.resolveChargingHoldReason(
+            effectiveOnAC: true,
+            flowMode: .adapterBypass,
+            isFullyCharged: false,
+            batteryPercent: 40,
+            chargeLimit: alDente80,
+            notChargingReason: 0x0000_0008,
+            slowChargingReason: nil
+        )
+        XCTAssertEqual(holdBelowLimit, "Charging On Hold")
+
+        // No hold bits at 40% with 80% AlDente limit returns nil (does not blame charge limit).
+        let noReasonBelowLimit = PowerFlowResolver.resolveChargingHoldReason(
+            effectiveOnAC: true,
+            flowMode: .adapterBypass,
+            isFullyCharged: false,
+            batteryPercent: 40,
+            chargeLimit: alDente80,
+            notChargingReason: 0,
+            slowChargingReason: nil
+        )
+        XCTAssertNil(noReasonBelowLimit)
+
+        // At 80% with 80% AlDente limit and inhibited bit (0x0008), reports AlDente charge limit.
+        let alDenteAtCeiling = PowerFlowResolver.resolveChargingHoldReason(
+            effectiveOnAC: true,
+            flowMode: .adapterBypass,
+            isFullyCharged: false,
+            batteryPercent: 80,
+            chargeLimit: alDente80,
+            notChargingReason: 0x0000_0008,
+            slowChargingReason: nil
+        )
+        XCTAssertEqual(alDenteAtCeiling, "Charge Limit (80% · AlDente)")
+    }
+
+    func testIncludeChargeLimitFalseSkipsProviderAndExtremeCapacityClampsSafely() {
+        let calls = LockedCounter()
+        let resolver = PowerFlowResolver(
+            polarityCalibrator: SMCPolarityCalibrator(userDefaults: nil, modelIdentifier: "SkipLimitMac"),
+            chargeLimitProvider: { _ in
+                calls.increment()
+                return BatteryChargeLimitInfo(limitPercent: 80, source: .alDente)
+            }
+        )
+
+        let skipped = resolver.resolve(
+            reading: makeReading(
+                isExternalConnected: true,
+                designCapacityMAh: 1,
+                rawMaxCapacityMAh: Int.max,
+                fullChargeCapacityMAh: Int.max,
+                nominalCapacityMAh: Int.max
+            ),
+            connectionPhase: .onAC,
+            isLowPowerModeEnabled: false,
+            includeChargeLimit: false
+        )
+        XCTAssertEqual(calls.value, 0)
+        XCTAssertEqual(skipped.chargeLimitPercent, 100)
+        XCTAssertEqual(skipped.health.macOSCapacityPercent, 100)
+    }
+
+    @MainActor
+    func testDormantSteadyStateSkipsHealthDetailsAndChargeLimit() {
+        let store = PowerSettingsStore(userDefaults: nil, manageLaunchAtLogin: false)
+        store.settings.menuBarDisplayMode = .iconOnly
+        let mockBattery = MockSmartBatteryReader(reading: makeReading(currentCapacityPercent: 80, isExternalConnected: true))
+        let mockPorts = MockIOPortReader(entries: [])
+        let mockNotifier = MockPowerEventNotifier()
+        let chargeLimitCalls = LockedCounter()
+        let resolver = PowerFlowResolver(
+            polarityCalibrator: SMCPolarityCalibrator(userDefaults: nil, modelIdentifier: "DormantMac"),
+            chargeLimitProvider: { _ in
+                chargeLimitCalls.increment()
+                return .unlimited
+            }
+        )
+
+        let monitor = PowerMonitor(
+            settingsStore: store,
+            smartBatteryReader: mockBattery,
+            ioPortReader: mockPorts,
+            smcReader: SMCReader(keyReader: SilentSMCKeyReader()),
+            notifier: mockNotifier,
+            resolver: resolver,
+            isDisplayAsleepProvider: { false }
+        )
+        defer { monitor.stop() }
+        monitor.start()
+
+        let startExp = expectation(description: "startup sample")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { startExp.fulfill() }
+        wait(for: [startExp], timeout: 1.0)
+
+        XCTAssertEqual(mockBattery.healthDetailsScanCount, 1)
+        XCTAssertEqual(chargeLimitCalls.value, 1)
+
+        mockBattery.resetCounters()
+        let beforeLimitCalls = chargeLimitCalls.value
+        mockNotifier.emit(.powerSourceChanged)
+
+        let eventExp = expectation(description: "dormant steady sample")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { eventExp.fulfill() }
+        wait(for: [eventExp], timeout: 1.0)
+
+        XCTAssertEqual(mockBattery.readCount, 1)
+        XCTAssertEqual(mockBattery.healthDetailsScanCount, 0)
+        XCTAssertEqual(chargeLimitCalls.value, beforeLimitCalls)
+    }
+
+    func testCaptureSingleSnapshotReadsFullDetailsAndDefaultsToMemoryOnlyCalibrator() {
+        let mockBattery = MockSmartBatteryReader(
+            reading: makeReading(currentCapacityPercent: 75, isExternalConnected: false, instantAmperageMA: -1_200)
+        )
+        let mockPorts = MockIOPortReader(entries: [])
+        let mockSMC = SMCReader(keyReader: SilentSMCKeyReader())
+
+        let snapshot = PowerMonitor.captureSingleSnapshot(
+            smartBatteryReader: mockBattery,
+            ioPortReader: mockPorts,
+            smcReader: mockSMC,
+            isLowPowerModeEnabled: false
+        )
+
+        XCTAssertTrue(snapshot.isDataAvailable)
+        XCTAssertEqual(snapshot.flowMode, .batteryOnly)
+        XCTAssertEqual(mockBattery.cellTopologyScanCount, 1)
+        XCTAssertEqual(mockBattery.healthDetailsScanCount, 1)
+        XCTAssertEqual(mockPorts.readCount, 1)
     }
 }

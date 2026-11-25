@@ -80,6 +80,9 @@ final class IOPortPowerReader: IOPortReadingProvider, @unchecked Sendable {
             defer { IOObjectRelease(portService) }
 
             let className = IOKitHelpers.copyClassName(entry: portService)
+            guard Self.isCandidatePowerPortClass(className) else {
+                continue
+            }
             guard let portProps = IOKitHelpers.copyRegistryProperties(entry: portService) else {
                 continue
             }
@@ -167,21 +170,15 @@ final class IOPortPowerReader: IOPortReadingProvider, @unchecked Sendable {
             sopComponents: sopComponents
         )
 
-        // DisplayPort Status & Product Name Fallback
-        var isDisplayPortActive = false
-        var displayProductName: String?
-        for dp in displayPortStates {
-            if IOKitHelpers.extractBool(dp, key: "Active") == true {
-                isDisplayPortActive = true
-            }
-            if displayProductName == nil {
-                displayProductName = IOKitHelpers.extractString(dp, key: "ProductName")
-            }
-        }
+        // DisplayPort Status, Product Name & Manufacturer Fallback (prefer Active == true nodes)
+        let (isDisplayPortActive, displayProductName, displayManufacturer) = parseDisplayPortIdentity(
+            displayPortStates: displayPortStates
+        )
 
-        // USB2 / USB3 Product & Manufacturer
-        let (rawUSBProduct, usbManufacturer) = parseUSBIdentity(usbStates: usbStates)
+        // USB4 / Thunderbolt / USB3 / USB2 Product & Manufacturer
+        let (rawUSBProduct, rawUSBManufacturer) = parseUSBIdentity(usbStates: usbStates)
         let usbProductName = rawUSBProduct ?? (isDisplayPortActive ? displayProductName : nil)
+        let usbManufacturer = rawUSBManufacturer ?? (isDisplayPortActive ? displayManufacturer : nil)
 
         // Active Transports & Cable Type (SOP')
         let activeTransports = parseActiveTransports(portProperties: portProperties)
@@ -204,6 +201,23 @@ final class IOPortPowerReader: IOPortReadingProvider, @unchecked Sendable {
             activeTransports: activeTransports,
             cableType: cableType
         )
+    }
+
+    /// Pre-filters IORegistry `IOPort` subclasses before copying full property dictionaries so
+    /// non-power ports (e.g. `AppleHDMIPortController`, `AppleSDXCSlot`) are skipped cheaply.
+    static func isCandidatePowerPortClass(_ className: String?) -> Bool {
+        guard let className else { return true }
+        if className == "AppleHPMInterfaceType10" || className == "AppleHPMInterfaceType11" {
+            return true
+        }
+        if className == "IOPort" || className.hasPrefix("AppleHPM") {
+            return true
+        }
+        let lowered = className.lowercased()
+        return lowered.contains("usbc")
+            || lowered.contains("usb-c")
+            || lowered.contains("typec")
+            || lowered.contains("magsafe")
     }
 
     static func resolvePortKind(className: String?, properties: [String: Any]) -> PowerPortKind {
@@ -297,7 +311,8 @@ final class IOPortPowerReader: IOPortReadingProvider, @unchecked Sendable {
                 if let props = IOKitHelpers.copyRegistryProperties(entry: child) {
                     collection.sopPrimeComponents.append(props)
                 }
-            case "IOPortTransportStateUSB3", "IOPortTransportStateUSB2":
+            case "IOPortTransportStateUSB4", "IOPortTransportStateThunderbolt",
+                 "IOPortTransportStateUSB3", "IOPortTransportStateUSB2":
                 if let props = IOKitHelpers.copyRegistryProperties(entry: child) {
                     collection.usbStates.append(props)
                 }
@@ -378,10 +393,44 @@ final class IOPortPowerReader: IOPortReadingProvider, @unchecked Sendable {
         return (vendorID, productID)
     }
 
+    private static func parseDisplayPortIdentity(
+        displayPortStates: [[String: Any]]
+    ) -> (isActive: Bool, productName: String?, manufacturer: String?) {
+        let activeStates = displayPortStates.filter {
+            IOKitHelpers.extractBool($0, key: "Active") == true
+        }
+        let isActive = !activeStates.isEmpty
+        let ordered = activeStates + displayPortStates.filter {
+            IOKitHelpers.extractBool($0, key: "Active") != true
+        }
+
+        var productName: String?
+        var manufacturer: String?
+        for dp in ordered {
+            let meta = IOKitHelpers.extractDict(dp, key: "Metadata")
+            if productName == nil {
+                productName = IOKitHelpers.extractString(dp, key: "ProductName")
+                    ?? IOKitHelpers.extractString(dp, key: "Product")
+                    ?? meta.flatMap { IOKitHelpers.extractString($0, key: "ProductName") }
+                    ?? meta.flatMap { IOKitHelpers.extractString($0, key: "Product") }
+            }
+            if manufacturer == nil {
+                manufacturer = IOKitHelpers.extractString(dp, key: "ManufacturerName")
+                    ?? IOKitHelpers.extractString(dp, key: "Manufacturer")
+                    ?? meta.flatMap { IOKitHelpers.extractString($0, key: "ManufacturerName") }
+                    ?? meta.flatMap { IOKitHelpers.extractString($0, key: "Manufacturer") }
+            }
+            if productName != nil && manufacturer != nil {
+                break
+            }
+        }
+        return (isActive, productName, manufacturer)
+    }
+
     private static func parseUSBIdentity(
         usbStates: [[String: Any]]
     ) -> (product: String?, manufacturer: String?) {
-        // Prioritize active USB states first (e.g. USB3 active over inactive USB2, or vice versa).
+        // Prioritize active USB states first (e.g. USB4/Thunderbolt/USB3 active over inactive USB2).
         let ordered = usbStates.sorted { lhs, rhs in
             let lhsActive = IOKitHelpers.extractBool(lhs, key: "Active") ?? false
             let rhsActive = IOKitHelpers.extractBool(rhs, key: "Active") ?? false
@@ -398,11 +447,15 @@ final class IOPortPowerReader: IOPortReadingProvider, @unchecked Sendable {
             let meta = IOKitHelpers.extractDict(usb, key: "Metadata")
             if product == nil {
                 product = IOKitHelpers.extractString(usb, key: "Product")
+                    ?? IOKitHelpers.extractString(usb, key: "ProductName")
                     ?? meta.flatMap { IOKitHelpers.extractString($0, key: "Product") }
+                    ?? meta.flatMap { IOKitHelpers.extractString($0, key: "ProductName") }
             }
             if manufacturer == nil {
                 manufacturer = IOKitHelpers.extractString(usb, key: "Manufacturer")
+                    ?? IOKitHelpers.extractString(usb, key: "ManufacturerName")
                     ?? meta.flatMap { IOKitHelpers.extractString($0, key: "Manufacturer") }
+                    ?? meta.flatMap { IOKitHelpers.extractString($0, key: "ManufacturerName") }
             }
             if product != nil && manufacturer != nil {
                 break

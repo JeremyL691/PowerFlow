@@ -33,7 +33,10 @@ final class PowerFlowResolver: @unchecked Sendable {
         connectionPhase: PowerConnectionPhase,
         isLowPowerModeEnabled: Bool,
         thermalState: ProcessInfo.ThermalState = ProcessInfo.processInfo.thermalState,
-        timestamp: Date = Date()
+        timestamp: Date = Date(),
+        isInTransition: Bool = false,
+        includeChargeLimit: Bool = true,
+        hasLivePortOutputs: Bool = true
     ) -> PowerSnapshot {
         guard let reading else {
             return PowerSnapshot(
@@ -65,12 +68,13 @@ final class PowerFlowResolver: @unchecked Sendable {
                 portTopology: portTopology,
                 liveOutputs: smc.portOutputs
             ),
-            at: timestamp
+            at: timestamp,
+            hasLivePortOutputs: hasLivePortOutputs
         )
         let totalOutboundPowerW = outboundPorts.reduce(0.0) { $0 + $1.powerW }
         let totalOutboundCurrentA = outboundPorts.reduce(0.0) { $0 + $1.currentA }
 
-        // 2. Active & Standby Adapter Resolution (suppressed when onBattery to prevent stale glitches)
+        // 2. Active & Standby Adapter Resolution (suppressed when not effectively on AC)
         let activeAdapter: AdapterSourceInfo?
         let standbyAdapters: [AdapterSourceInfo]
         let adapterInputVoltageV: Double
@@ -78,7 +82,7 @@ final class PowerFlowResolver: @unchecked Sendable {
         let adapterInputPowerW: Double
         let adapterEfficiencyLossW: Double?
 
-        if connectionPhase == .onBattery {
+        if !effectiveOnAC {
             activeAdapter = nil
             standbyAdapters = []
             adapterInputVoltageV = 0
@@ -145,13 +149,27 @@ final class PowerFlowResolver: @unchecked Sendable {
             || reading.instantAmperageMA != 0
             || reading.amperageMA != 0
 
-        var batteryCurrentA = smc.batteryCurrentA ?? rawIOKitCurrentA
+        let rawSignedCurrentA = smc.batteryCurrentA ?? rawIOKitCurrentA
+        var batteryCurrentA = rawSignedCurrentA
         if !effectiveOnAC && batteryCurrentA > 0.005 {
             batteryCurrentA = -abs(batteryCurrentA)
         }
         if abs(batteryCurrentA) < 0.005 {
             batteryCurrentA = 0
         }
+
+        let currentSignConsistentForCalibration: Bool = {
+            if !effectiveOnAC {
+                return !hasExplicitCurrentReading || rawSignedCurrentA <= -0.02
+            }
+            if reading.isCharging {
+                return !hasExplicitCurrentReading || rawSignedCurrentA >= 0.02
+            }
+            return false
+        }()
+        let allowPolarityCalibration = !isInTransition
+            && connectionPhase != .connectingAC
+            && currentSignConsistentForCalibration
 
         // Preliminary system load estimate for energy-balance cross-checking
         let preliminaryLoadW: Double = {
@@ -189,7 +207,8 @@ final class PowerFlowResolver: @unchecked Sendable {
                 let calibrated = polarityCalibrator.normalizeBatteryPower(
                     rawPPBR: rawPPBR,
                     isExternalConnected: effectiveOnAC,
-                    isCharging: reading.isCharging
+                    isCharging: reading.isCharging,
+                    allowCalibration: allowPolarityCalibration
                 )
                 // On Apple Silicon models where PPBR is discharge-only (~0.0–0.8W while charging),
                 // fall back to IOKit BatteryPower or V*I when PPBR severely under-reports active flow.
@@ -297,7 +316,8 @@ final class PowerFlowResolver: @unchecked Sendable {
         let batteryPercent: Int = {
             if reading.maxCapacityPercent > 0 && reading.maxCapacityPercent != 100 {
                 let scaled = (Double(reading.currentCapacityPercent) / Double(reading.maxCapacityPercent)) * 100.0
-                return min(max(Int(scaled.rounded()), 0), 100)
+                guard scaled.isFinite else { return 0 }
+                return Int(min(max(scaled.rounded(), 0.0), 100.0))
             }
             return min(max(reading.currentCapacityPercent, 0), 100)
         }()
@@ -320,8 +340,9 @@ final class PowerFlowResolver: @unchecked Sendable {
             else {
                 return nil
             }
-            let pct = Int(((Double(numerator) / Double(design)) * 100.0).rounded())
-            return min(max(pct, 0), 100)
+            let rawPct = (Double(numerator) / Double(design)) * 100.0
+            guard rawPct.isFinite else { return nil }
+            return Int(min(max(rawPct.rounded(), 0.0), 100.0))
         }()
 
         let health = BatteryHealthInfo(
@@ -340,7 +361,9 @@ final class PowerFlowResolver: @unchecked Sendable {
             lifetime: reading.lifetimeStats
         )
 
-        let chargeLimit = chargeLimitProvider(reading.notChargingReason)
+        let chargeLimit: BatteryChargeLimitInfo = includeChargeLimit
+            ? chargeLimitProvider(reading.notChargingReason)
+            : BatteryChargeLimitResolver.resolve(notChargingReason: reading.notChargingReason)
         let batteryTemperatureC = smc.batteryTemperatureC ?? reading.temperatureC
 
         // 7. Energy (Wh), Wall Power Estimate, Charging Hold Reason, System Breakdown & Physical Ports
@@ -356,7 +379,7 @@ final class PowerFlowResolver: @unchecked Sendable {
             .map { Double($0) * nominalPackVoltageV / 1000.0 }
 
         let wallPowerEstimateW: Double? = {
-            guard connectionPhase != .onBattery, adapterInputPowerW > 0.05 else { return nil }
+            guard effectiveOnAC, adapterInputPowerW > 0.05 else { return nil }
             if let loss = adapterEfficiencyLossW, loss >= 0 {
                 return adapterInputPowerW + loss
             }
@@ -399,7 +422,7 @@ final class PowerFlowResolver: @unchecked Sendable {
 
         let physicalPorts = Self.resolvePhysicalPorts(
             portTopology: portTopology,
-            connectionPhase: connectionPhase,
+            connectionPhase: effectiveOnAC ? connectionPhase : .onBattery,
             activeAdapter: activeAdapter,
             standbyAdapters: standbyAdapters,
             outboundPorts: outboundPorts,
@@ -418,7 +441,8 @@ final class PowerFlowResolver: @unchecked Sendable {
             maxCapacityMAh: health.rawMaxCapacityMAh ?? health.nominalCapacityMAh ?? health.designCapacityMAh,
             batteryCurrentA: batteryCurrentA,
             batteryPowerW: batteryPowerW,
-            batteryVoltageV: batteryVoltageV
+            batteryVoltageV: batteryVoltageV,
+            timestamp: timestamp
         )
 
         return PowerSnapshot(
@@ -544,7 +568,8 @@ final class PowerFlowResolver: @unchecked Sendable {
         maxCapacityMAh: Int?,
         batteryCurrentA: Double,
         batteryPowerW: Double,
-        batteryVoltageV: Double
+        batteryVoltageV: Double,
+        timestamp: Date
     ) -> (minutes: Int?, isToFull: Bool) {
         switch flowMode {
         case .adapterCharging:
@@ -556,13 +581,14 @@ final class PowerFlowResolver: @unchecked Sendable {
                 maxCapacityMAh: maxCapacityMAh,
                 batteryCurrentA: batteryCurrentA,
                 batteryPowerW: batteryPowerW,
-                batteryVoltageV: batteryVoltageV
+                batteryVoltageV: batteryVoltageV,
+                at: timestamp
             )
-            let osMinutes = BatteryTimeEstimator.sanitizedOSMinutes(reading.timeRemainingMinutes)
             if chargeLimitPercent < 100 {
-                // OS estimate targets 100%; prefer estimator targeting the active charge limit.
-                return (estimatorMinutes ?? osMinutes, true)
+                // OS estimate targets 100%; never fall back to it when a lower charge limit is active.
+                return (estimatorMinutes, true)
             }
+            let osMinutes = BatteryTimeEstimator.sanitizedOSMinutes(reading.timeRemainingMinutes)
             return (osMinutes ?? estimatorMinutes, true)
 
         case .batteryWhilePluggedIn where isDrainingToLimit:
@@ -581,7 +607,8 @@ final class PowerFlowResolver: @unchecked Sendable {
                 maxCapacityMAh: maxCapacityMAh,
                 batteryCurrentA: batteryCurrentA,
                 batteryPowerW: batteryPowerW,
-                batteryVoltageV: batteryVoltageV
+                batteryVoltageV: batteryVoltageV,
+                at: timestamp
             )
             return (osMinutes ?? estimatorMinutes, false)
 
@@ -645,23 +672,46 @@ final class PowerFlowResolver: @unchecked Sendable {
             return "Fully Charged"
         }
 
-        switch chargeLimit.source {
-        case .alDente:
-            return "Charge Limit (\(chargeLimit.limitPercent)% · AlDente)"
-        case .optimizedCharging:
-            return "Optimized Battery Charging"
-        case .macOSSetting:
-            return "Charge Limit (\(chargeLimit.limitPercent)%)"
-        case .none:
-            break
+        // Hardware thermal protection always takes precedence over configured charge limits.
+        if let reason = notChargingReason, reason != 0 {
+            if (reason & 0x0000_0004) != 0 || (reason & 0x0000_0020) != 0 {
+                return "Thermal Protection"
+            }
+        }
+
+        let atChargeLimitCeiling = chargeLimit.source != .none
+            && batteryPercent >= chargeLimit.limitPercent - 1
+
+        // Only attribute a charging hold to a configured limit when SoC is actually at the ceiling;
+        // otherwise check hardware hold bits first so mid-charge holds are not misattributed.
+        if let reason = notChargingReason, reason != 0, !atChargeLimitCeiling {
+            if (reason & 0x0000_0008) != 0 {
+                return "Charging On Hold"
+            }
+            if (reason & 0x0100_0000) != 0 || (reason & 0x0480) != 0 {
+                return "Optimized Battery Charging"
+            }
+            if (reason & 0x0040_0000) != 0 {
+                return "Fully Charged"
+            }
+        }
+
+        if atChargeLimitCeiling {
+            switch chargeLimit.source {
+            case .alDente:
+                return "Charge Limit (\(chargeLimit.limitPercent)% · AlDente)"
+            case .optimizedCharging:
+                return "Optimized Battery Charging"
+            case .macOSSetting:
+                return "Charge Limit (\(chargeLimit.limitPercent)%)"
+            case .none:
+                break
+            }
         }
 
         if let reason = notChargingReason, reason != 0 {
             if (reason & 0x0100_0000) != 0 || (reason & 0x0480) != 0 {
                 return "Optimized Battery Charging"
-            }
-            if (reason & 0x0000_0004) != 0 || (reason & 0x0000_0020) != 0 {
-                return "Thermal Protection"
             }
             if (reason & 0x0040_0000) != 0 {
                 return "Fully Charged"

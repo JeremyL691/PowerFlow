@@ -1,8 +1,11 @@
 import AppKit
+import Combine
 import Foundation
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+    @Published private(set) var settingsMenuTitle: String = L10n.string(.settings)
+
     private var settingsStore: PowerSettingsStore?
     private var monitor: PowerMonitor?
     private var statusItemController: StatusItemController?
@@ -28,12 +31,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         let store: PowerSettingsStore
-        if isSmokeUI {
+        let resolver: PowerFlowResolver
+        if isSmokeMode {
             store = PowerSettingsStore(userDefaults: nil, manageLaunchAtLogin: false)
+            resolver = PowerFlowResolver(polarityCalibrator: SMCPolarityCalibrator(userDefaults: nil))
         } else {
-            store = PowerSettingsStore(manageLaunchAtLogin: !isSmokeMode)
+            store = PowerSettingsStore(manageLaunchAtLogin: true)
+            resolver = PowerFlowResolver()
         }
-        let powerMonitor = PowerMonitor(settingsStore: store)
+        updateSettingsMenuTitle(language: store.settings.appLanguage)
+
+        let powerMonitor = PowerMonitor(settingsStore: store, resolver: resolver)
+        let existingOnChange = store.onChange
+        store.onChange = { [weak self] newSettings in
+            existingOnChange?(newSettings)
+            self?.updateSettingsMenuTitle(language: newSettings.appLanguage)
+        }
         let controller = StatusItemController(monitor: powerMonitor)
 
         self.settingsStore = store
@@ -46,6 +59,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             scheduleSmokeLaunchVerification()
         } else if isSmokeUI {
             scheduleSmokeUIVerification()
+        }
+    }
+
+    private func updateSettingsMenuTitle(language: AppLanguage) {
+        let title = L10n.string(.settings, language: language)
+        if settingsMenuTitle != title {
+            settingsMenuTitle = title
         }
     }
 
@@ -69,7 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - CLI Verification Modes
 
     private func runDumpSnapshotAndExit() {
-        let snapshot = PowerMonitor.captureSingleSnapshot()
+        let resolver = PowerFlowResolver(polarityCalibrator: SMCPolarityCalibrator(userDefaults: nil))
+        let snapshot = PowerMonitor.captureSingleSnapshot(resolver: resolver)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -124,7 +145,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 exit(1)
             }
             controller.reveal()
-            monitor.setPopoverVisible(true)
+            if controller.isPopoverShown && !monitor.isPopoverVisible {
+                monitor.setPopoverVisible(true)
+            }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
                 guard let self else { exit(1) }

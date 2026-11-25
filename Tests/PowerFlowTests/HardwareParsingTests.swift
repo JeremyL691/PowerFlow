@@ -631,14 +631,277 @@ final class HardwareParsingTests: XCTestCase {
         XCTAssertEqual(fullSample1.fans[1].rpm, 1850.0, accuracy: 0.01)
         XCTAssertEqual(fullSample1.fans[1].maxRpm ?? 0, 6800.0, accuracy: 0.01)
 
-        // Second full scan reuses cached discovery (FNum, F0Mx, PHPC); die temperature candidates are probed every sample
+        // Second full scan reuses cached discovery (FNum, F0Mx, PHPC) and pinned present die-temp sensors
         _ = reader.readSample(full: true)
         XCTAssertEqual(mock.callCount(for: "FNum"), 1)
         XCTAssertEqual(mock.callCount(for: "F0Mx"), 1)
         XCTAssertEqual(mock.callCount(for: "F0Ac"), 2)
-        XCTAssertEqual(mock.callCount(for: "Tp09"), 2)
+        XCTAssertEqual(mock.callCount(for: "Tp09"), 1)
         XCTAssertEqual(mock.callCount(for: "Tp0D"), 2)
         XCTAssertEqual(mock.callCount(for: "PHPC"), 2)
+
+        // Resetting discovery caches causes absent candidates to be re-probed
+        reader.resetDiscoveryCaches()
+        _ = reader.readSample(full: true)
+        XCTAssertEqual(mock.callCount(for: "Tp09"), 2)
+        XCTAssertEqual(mock.callCount(for: "Tp0D"), 3)
+        XCTAssertEqual(mock.callCount(for: "PHPC"), 3)
+    }
+
+    func testLifetimeTemperatureIntMinDoesNotCrashAndAverageAlwaysTenths() {
+        let intMinSentinel = NSNumber(value: UInt64(bitPattern: Int64.min))
+        let packProperties: [String: Any] = [
+            "BatteryData": [
+                "LifetimeData": [
+                    "TotalOperatingTime": 1000,
+                    "MinimumTemperature": intMinSentinel,
+                    "AverageTemperature": 95, // 9.5 °C (0.1 °C units even when <= 100)
+                    "MaximumTemperature": 40  // whole 1 °C
+                ]
+            ]
+        ]
+
+        let reading = SmartBatteryReader.parseSmartBattery(
+            properties: [:],
+            packProperties: packProperties
+        )
+        let lifetime = reading.lifetimeStats
+        XCTAssertNotNil(lifetime)
+        XCTAssertNil(lifetime?.minTempC)
+        XCTAssertEqual(lifetime?.avgTempC ?? 0, 9.5, accuracy: 0.001)
+        XCTAssertEqual(lifetime?.maxTempC ?? 0, 40.0, accuracy: 0.001)
+
+        // All temperature fields at Int.min sentinel must safely yield nil without crashing
+        let allSentinelReading = SmartBatteryReader.parseSmartBattery(
+            properties: [:],
+            packProperties: [
+                "BatteryData": [
+                    "LifetimeData": [
+                        "MinimumTemperature": intMinSentinel,
+                        "AverageTemperature": intMinSentinel,
+                        "MaximumTemperature": intMinSentinel
+                    ]
+                ]
+            ]
+        )
+        XCTAssertNil(allSentinelReading.lifetimeStats)
+    }
+
+    func testSmartBatteryTemperaturePrioritizesNestedCentiCAndConvertsSMBusDeciKelvin() {
+        // Intel / older macOS SMBus deci-Kelvin on top-level Temperature
+        let coolSMBus = SmartBatteryReader.parseSmartBattery(properties: ["Temperature": 2882])
+        XCTAssertEqual(coolSMBus.temperatureC ?? 0, 15.05, accuracy: 0.01)
+
+        let warmSMBus = SmartBatteryReader.parseSmartBattery(properties: ["Temperature": 3182])
+        XCTAssertEqual(warmSMBus.temperatureC ?? 0, 45.05, accuracy: 0.01)
+
+        // Centi-Kelvin on top-level Temperature still converts accurately
+        let centiK = SmartBatteryReader.parseSmartBattery(properties: ["Temperature": 31_084])
+        XCTAssertEqual(centiK.temperatureC ?? 0, 37.69, accuracy: 0.01)
+
+        // Nested BatteryData.Temperature (centi-°C) takes priority over top-level Temperature
+        let nestedPreferred = SmartBatteryReader.parseSmartBattery(
+            properties: [
+                "Temperature": 2882,
+                "BatteryData": ["Temperature": 3769]
+            ]
+        )
+        XCTAssertEqual(nestedPreferred.temperatureC ?? 0, 37.69, accuracy: 0.01)
+
+        // Pack.BatteryData.VirtualTemperature takes priority over top-level SMBus Temperature
+        let virtualPreferred = SmartBatteryReader.parseSmartBattery(
+            properties: ["Temperature": 2882],
+            packProperties: ["BatteryData": ["VirtualTemperature": 3425]]
+        )
+        XCTAssertEqual(virtualPreferred.temperatureC ?? 0, 34.25, accuracy: 0.01)
+    }
+
+    func testUSBPDProfileIDsAreUniqueWhenMissingAndExplicitZeroIndicesCollide() {
+        let menu: [[String: Any]] = [
+            ["MaxVoltage": 5000, "MaxCurrent": 3000],                 // missing Index -> 0
+            ["Index": 0, "MaxVoltage": 9000, "MaxCurrent": 3000],     // explicit Index 0 collision
+            ["Index": 1, "MaxVoltage": 15_000, "MaxCurrent": 3000],
+            ["Index": 1, "MaxVoltage": 20_000, "MaxCurrent": 3390]    // duplicate explicit Index 1
+        ]
+
+        let profiles = SmartBatteryReader.parseUSBPDProfiles(from: menu, activeIndex: 0)
+        XCTAssertEqual(profiles.count, 4)
+        XCTAssertEqual(Set(profiles.map(\.id)).count, 4)
+    }
+
+    func testSmartBatteryReaderFastPathSkipsPackAndIOPSAndCachesCellTopology() {
+        final class State: @unchecked Sendable {
+            private let lock = NSLock()
+            var serial = "SERIAL-A"
+            var packCalls = 0
+            var iopsCalls = 0
+            var bankCalls = 0
+
+            func readBatteryProps() -> [String: Any] {
+                lock.lock()
+                let currentSerial = serial
+                lock.unlock()
+                return [
+                    "CurrentCapacity": 85,
+                    "MaxCapacity": 100,
+                    "ExternalConnected": true,
+                    "Serial": currentSerial
+                ]
+            }
+
+            func readPackProps() -> [String: Any]? {
+                lock.lock()
+                packCalls += 1
+                lock.unlock()
+                return ["BatteryData": ["StateOfCharge": 85]]
+            }
+
+            func readIOPS() -> BatteryCondition {
+                lock.lock()
+                iopsCalls += 1
+                lock.unlock()
+                return .normal
+            }
+
+            func readBankTopology() -> BatteryCellTopology? {
+                lock.lock()
+                bankCalls += 1
+                lock.unlock()
+                return BatteryCellTopology(seriesCount: 3, parallelCount: 2, voltagesMV: [4100, 4101, 4102])
+            }
+
+            func setSerial(_ next: String) {
+                lock.lock()
+                serial = next
+                lock.unlock()
+            }
+
+            var counts: (pack: Int, iops: Int, bank: Int) {
+                lock.lock()
+                defer { lock.unlock() }
+                return (packCalls, iopsCalls, bankCalls)
+            }
+        }
+
+        let state = State()
+        let reader: any SmartBatteryReadingProvider = SmartBatteryReader(
+            batteryPropertiesProvider: { state.readBatteryProps() },
+            packPropertiesProvider: { state.readPackProps() },
+            iopsConditionProvider: { state.readIOPS() },
+            bankTopologyProvider: { state.readBankTopology() }
+        )
+
+        // includeHealthDetails: false skips AppleSmartBatteryPack and IOPS health IPC
+        let fast = reader.readSmartBattery(includeCellTopology: false, includeHealthDetails: false)
+        XCTAssertEqual(fast?.currentCapacityPercent, 85)
+        XCTAssertNil(fast?.cellTopology)
+        XCTAssertEqual(state.counts.pack, 0)
+        XCTAssertEqual(state.counts.iops, 0)
+        XCTAssertEqual(state.counts.bank, 0)
+
+        // Full read populates health details and caches static cell topology
+        let full1 = reader.readSmartBattery(includeCellTopology: true, includeHealthDetails: true)
+        XCTAssertEqual(full1?.cellTopology?.label, "3S2P")
+        XCTAssertEqual(full1?.condition, .normal)
+        XCTAssertEqual(state.counts.pack, 1)
+        XCTAssertEqual(state.counts.iops, 1)
+        XCTAssertEqual(state.counts.bank, 1)
+
+        // Subsequent full read reuses cached cell topology without re-walking banks/cells
+        let full2 = reader.readSmartBattery(includeCellTopology: true, includeHealthDetails: true)
+        XCTAssertEqual(full2?.cellTopology?.seriesCount, 3)
+        XCTAssertEqual(state.counts.pack, 2)
+        XCTAssertEqual(state.counts.iops, 2)
+        XCTAssertEqual(state.counts.bank, 1)
+
+        // Changing battery serial invalidates cached topology
+        state.setSerial("SERIAL-B")
+        _ = reader.readSmartBattery(includeCellTopology: true, includeHealthDetails: true)
+        XCTAssertEqual(state.counts.bank, 2)
+    }
+
+    func testSMCReaderIntegerVoltageAlwaysDividesBy1000AndSupportsIntelKeysAndSixPorts() {
+        let mock = MockSMCKeyReader(values: [
+            // 45 mV integer voltage (<= 60) must divide by 1000 -> 0.045 V, NOT 45.0 V
+            "B0AV": SMCValue(key: "B0AV", dataSize: 2, dataType: "ui16", bytes: [0, 45]),
+            "VD0R": SMCValue(key: "VD0R", dataSize: 2, dataType: "ui16", bytes: [0, 12]),
+            // Intel CPU & GPU die temperature keys
+            "TC0D": makeFloatSMCValue(key: "TC0D", value: 64.5),
+            "TC1C": makeFloatSMCValue(key: "TC1C", value: 67.2),
+            "TG0P": makeFloatSMCValue(key: "TG0P", value: 56.5),
+            // 5th and 6th USB-C ports (Mac mini M4 Pro / Mac Studio)
+            "D5JI": makeFloatSMCValue(key: "D5JI", value: 1.5),
+            "D5JV": makeFloatSMCValue(key: "D5JV", value: 5.0),
+            "D6JI": makeFloatSMCValue(key: "D6JI", value: 0.8),
+            "D6JV": makeFloatSMCValue(key: "D6JV", value: 9.0)
+        ])
+
+        let reader = SMCReader(keyReader: mock, useLittleEndianBatteryKeys: false)
+        let sample = reader.readSample(full: true)
+
+        XCTAssertEqual(sample.batteryVoltageV ?? -1, 0.045, accuracy: 0.0001)
+        XCTAssertEqual(sample.adapterInputVoltageV ?? -1, 0.012, accuracy: 0.0001)
+        XCTAssertEqual(sample.cpuTemperatureC ?? 0, 67.2, accuracy: 0.01)
+        XCTAssertEqual(sample.gpuTemperatureC ?? 0, 56.5, accuracy: 0.01)
+        XCTAssertEqual(sample.portOutputs[5]?.currentA ?? -1, 1.5, accuracy: 0.001)
+        XCTAssertEqual(sample.portOutputs[5]?.voltageV ?? -1, 5.0, accuracy: 0.001)
+        XCTAssertEqual(sample.portOutputs[6]?.currentA ?? -1, 0.8, accuracy: 0.001)
+        XCTAssertEqual(sample.portOutputs[6]?.voltageV ?? -1, 9.0, accuracy: 0.001)
+    }
+
+    func testIOPortClassPreFilterAndActiveDisplayPortManufacturerAndUSB4() {
+        XCTAssertFalse(IOPortPowerReader.isCandidatePowerPortClass("AppleHDMIPortController"))
+        XCTAssertFalse(IOPortPowerReader.isCandidatePowerPortClass("AppleSDXCSlot"))
+        XCTAssertTrue(IOPortPowerReader.isCandidatePowerPortClass("AppleHPMInterfaceType10"))
+        XCTAssertTrue(IOPortPowerReader.isCandidatePowerPortClass("AppleHPMInterfaceType11"))
+        XCTAssertTrue(IOPortPowerReader.isCandidatePowerPortClass("IOPort"))
+
+        // Active DisplayPort node must beat inactive node for both ProductName and ManufacturerName
+        let dpMonitor = IOPortPowerReader.parsePortEntry(
+            portProperties: [
+                "IOClass": "AppleHPMInterfaceType10",
+                "PortType": 2,
+                "PortNumber": 2,
+                "ConnectionActive": true
+            ],
+            displayPortStates: [
+                [
+                    "Active": false,
+                    "ProductName": "Inactive Ghost Display",
+                    "ManufacturerName": "Ghost Corp"
+                ],
+                [
+                    "Active": true,
+                    "ProductName": "Studio Display",
+                    "ManufacturerName": "Apple Inc."
+                ]
+            ]
+        )
+
+        XCTAssertEqual(dpMonitor?.isDisplayPortActive, true)
+        XCTAssertEqual(dpMonitor?.usbProductName, "Studio Display")
+        XCTAssertEqual(dpMonitor?.usbManufacturer, "Apple Inc.")
+
+        // USB4 / Thunderbolt transport identity with ProductName & ManufacturerName
+        let usb4Dock = IOPortPowerReader.parsePortEntry(
+            portProperties: [
+                "IOClass": "AppleHPMInterfaceType10",
+                "PortType": 2,
+                "PortNumber": 3,
+                "ConnectionActive": true
+            ],
+            usbStates: [
+                [
+                    "Active": true,
+                    "Generation": 4,
+                    "ProductName": "TS4 Thunderbolt Dock",
+                    "ManufacturerName": "CalDigit"
+                ]
+            ]
+        )
+
+        XCTAssertEqual(usb4Dock?.usbProductName, "TS4 Thunderbolt Dock")
+        XCTAssertEqual(usb4Dock?.usbManufacturer, "CalDigit")
     }
 
     func testIOPortActiveTransportsAndSOPPrimeCableType() {

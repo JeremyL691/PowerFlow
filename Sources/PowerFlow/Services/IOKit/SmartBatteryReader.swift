@@ -6,23 +6,70 @@ import IOKit.ps
 
 protocol SmartBatteryReadingProvider: Sendable {
     func readSmartBattery(includeCellTopology: Bool) -> SmartBatteryReading?
-    func readExternalConnectedFast() -> Bool?
+    func readSmartBattery(includeCellTopology: Bool, includeHealthDetails: Bool) -> SmartBatteryReading?
+}
+
+extension SmartBatteryReadingProvider {
+    func readSmartBattery(includeCellTopology: Bool, includeHealthDetails: Bool) -> SmartBatteryReading? {
+        readSmartBattery(includeCellTopology: includeCellTopology)
+    }
 }
 
 // MARK: - Smart Battery Reader
 
 final class SmartBatteryReader: SmartBatteryReadingProvider, @unchecked Sendable {
-    init() {}
+    private let lock = NSLock()
+    private var batteryService: io_service_t = IO_OBJECT_NULL
+    private var cachedTopologyBatteryKey: String?
+    private var cachedCellTopology: BatteryCellTopology?
+
+    private let batteryPropertiesProvider: (@Sendable () -> [String: Any]?)?
+    private let packPropertiesProvider: @Sendable () -> [String: Any]?
+    private let iopsConditionProvider: @Sendable () -> BatteryCondition
+    private let bankTopologyProvider: @Sendable () -> BatteryCellTopology?
+
+    init(
+        batteryPropertiesProvider: (@Sendable () -> [String: Any]?)? = nil,
+        packPropertiesProvider: @escaping @Sendable () -> [String: Any]? = {
+            IOKitHelpers.copyIOServiceProperties(className: "AppleSmartBatteryPack")
+        },
+        iopsConditionProvider: @escaping @Sendable () -> BatteryCondition = {
+            SmartBatteryReader.readBatteryConditionFromIOPS()
+        },
+        bankTopologyProvider: @escaping @Sendable () -> BatteryCellTopology? = {
+            SmartBatteryReader.readBankCellTopologyFromIOKit()
+        }
+    ) {
+        self.batteryPropertiesProvider = batteryPropertiesProvider
+        self.packPropertiesProvider = packPropertiesProvider
+        self.iopsConditionProvider = iopsConditionProvider
+        self.bankTopologyProvider = bankTopologyProvider
+    }
+
+    deinit {
+        lock.lock()
+        if batteryService != IO_OBJECT_NULL {
+            IOObjectRelease(batteryService)
+            batteryService = IO_OBJECT_NULL
+        }
+        lock.unlock()
+    }
 
     func readSmartBattery(includeCellTopology: Bool) -> SmartBatteryReading? {
-        guard let properties = IOKitHelpers.copyIOServiceProperties(className: "AppleSmartBattery") else {
+        readSmartBattery(includeCellTopology: includeCellTopology, includeHealthDetails: true)
+    }
+
+    func readSmartBattery(includeCellTopology: Bool, includeHealthDetails: Bool) -> SmartBatteryReading? {
+        guard let properties = readBatteryProperties() else {
             return nil
         }
-        let packProperties = IOKitHelpers.copyIOServiceProperties(className: "AppleSmartBatteryPack")
-        let cellTopology = includeCellTopology
-            ? readCellTopology(batteryProperties: properties, packProperties: packProperties)
-            : nil
-        let iopsCondition = Self.readBatteryConditionFromIOPS()
+        let packProperties = includeHealthDetails ? packPropertiesProvider() : nil
+        let cellTopology = resolveCellTopology(
+            includeCellTopology: includeCellTopology,
+            batteryProperties: properties,
+            packProperties: packProperties
+        )
+        let iopsCondition = includeHealthDetails ? iopsConditionProvider() : nil
 
         return Self.parseSmartBattery(
             properties: properties,
@@ -33,35 +80,36 @@ final class SmartBatteryReader: SmartBatteryReadingProvider, @unchecked Sendable
         )
     }
 
-    func readExternalConnectedFast() -> Bool? {
-        guard let matching = IOServiceMatching("AppleSmartBattery") else { return nil }
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
-        guard service != IO_OBJECT_NULL else { return nil }
-        defer { IOObjectRelease(service) }
-
-        if let cfVal = IORegistryEntryCreateCFProperty(
-            service,
-            "ExternalConnected" as CFString,
-            kCFAllocatorDefault,
-            0
-        )?.takeRetainedValue(),
-            let connected = IOKitHelpers.extractBool(cfVal)
-        {
-            return connected
+    private func readBatteryProperties() -> [String: Any]? {
+        if let batteryPropertiesProvider {
+            return batteryPropertiesProvider()
         }
 
-        if let cfVal = IORegistryEntryCreateCFProperty(
-            service,
-            "AppleRawExternalConnected" as CFString,
-            kCFAllocatorDefault,
-            0
-        )?.takeRetainedValue(),
-            let connected = IOKitHelpers.extractBool(cfVal)
+        lock.lock()
+        defer { lock.unlock() }
+
+        if batteryService == IO_OBJECT_NULL {
+            batteryService = Self.matchAppleSmartBatteryService()
+        }
+        if batteryService != IO_OBJECT_NULL,
+           let props = IOKitHelpers.copyRegistryProperties(entry: batteryService)
         {
-            return connected
+            return props
         }
 
-        return nil
+        // Release stale handle and re-match once in case the service was replaced across sleep/reset.
+        if batteryService != IO_OBJECT_NULL {
+            IOObjectRelease(batteryService)
+            batteryService = IO_OBJECT_NULL
+        }
+        batteryService = Self.matchAppleSmartBatteryService()
+        guard batteryService != IO_OBJECT_NULL else { return nil }
+        return IOKitHelpers.copyRegistryProperties(entry: batteryService)
+    }
+
+    private static func matchAppleSmartBatteryService() -> io_service_t {
+        guard let matching = IOServiceMatching("AppleSmartBattery") else { return IO_OBJECT_NULL }
+        return IOServiceGetMatchingService(kIOMainPortDefault, matching)
     }
 
     // MARK: - Pure Parser (Unit Testable)
@@ -305,6 +353,8 @@ final class SmartBatteryReader: SmartBatteryReadingProvider, @unchecked Sendable
 
         var profiles: [USBPDProfile] = []
         profiles.reserveCapacity(rawMenu.count)
+        var usedIDs: Set<Int> = []
+        usedIDs.reserveCapacity(rawMenu.count)
 
         for (offset, item) in rawMenu.enumerated() {
             let profileIndex = IOKitHelpers.extractInt(item, key: "Index") ?? offset
@@ -316,13 +366,27 @@ final class SmartBatteryReader: SmartBatteryReadingProvider, @unchecked Sendable
                 continue
             }
 
+            let uniqueID: Int
+            if !usedIDs.contains(profileIndex) {
+                uniqueID = profileIndex
+            } else if !usedIDs.contains(offset) {
+                uniqueID = offset
+            } else {
+                var candidate = max(profileIndex, offset) + 1
+                while usedIDs.contains(candidate) {
+                    candidate += 1
+                }
+                uniqueID = candidate
+            }
+            usedIDs.insert(uniqueID)
+
             let maxVoltageV = Double(maxVoltageMV) / 1000.0
             let maxCurrentA = Double(maxCurrentMA) / 1000.0
             let maxWatts = maxVoltageV * maxCurrentA
 
             profiles.append(
                 USBPDProfile(
-                    id: profileIndex,
+                    id: uniqueID,
                     index: profileIndex,
                     maxVoltageV: maxVoltageV,
                     maxCurrentA: maxCurrentA,
@@ -332,7 +396,7 @@ final class SmartBatteryReader: SmartBatteryReadingProvider, @unchecked Sendable
             )
         }
 
-        return profiles.sorted { $0.index < $1.index }
+        return profiles.sorted { ($0.index, $0.id) < ($1.index, $1.id) }
     }
 
     static func parseLifetimeStats(
@@ -347,9 +411,18 @@ final class SmartBatteryReader: SmartBatteryReadingProvider, @unchecked Sendable
 
         let operatingHours = IOKitHelpers.extractInt(lifetime, key: "TotalOperatingTime")
             .flatMap { $0 > 0 ? $0 : nil }
-        let minTempC = normalizeLifetimeTempC(IOKitHelpers.extractInt(lifetime, key: "MinimumTemperature"))
-        let avgTempC = normalizeLifetimeTempC(IOKitHelpers.extractInt(lifetime, key: "AverageTemperature"))
-        let maxTempC = normalizeLifetimeTempC(IOKitHelpers.extractInt(lifetime, key: "MaximumTemperature"))
+        let minTempC = normalizeLifetimeTempC(
+            IOKitHelpers.extractInt(lifetime, key: "MinimumTemperature"),
+            isTenths: false
+        )
+        let avgTempC = normalizeLifetimeTempC(
+            IOKitHelpers.extractInt(lifetime, key: "AverageTemperature"),
+            isTenths: true
+        )
+        let maxTempC = normalizeLifetimeTempC(
+            IOKitHelpers.extractInt(lifetime, key: "MaximumTemperature"),
+            isTenths: false
+        )
 
         let minPackVoltageV = IOKitHelpers.extractInt(lifetime, key: "MinimumPackVoltage")
             .flatMap { $0 > 0 ? Double($0) / 1000.0 : nil }
@@ -385,14 +458,11 @@ final class SmartBatteryReader: SmartBatteryReadingProvider, @unchecked Sendable
         )
     }
 
-    private static func normalizeLifetimeTempC(_ raw: Int?) -> Double? {
+    private static func normalizeLifetimeTempC(_ raw: Int?, isTenths: Bool) -> Double? {
         guard let raw else { return nil }
-        let celsius: Double
-        if abs(raw) > 100 {
-            celsius = Double(raw) / 10.0
-        } else {
-            celsius = Double(raw)
-        }
+        // Avoid `abs(Int.min)` overflow on two's-complement gas-gauge sentinels (0x8000_0000_0000_0000).
+        guard Double(raw).magnitude.isFinite else { return nil }
+        let celsius = isTenths ? (Double(raw) / 10.0) : Double(raw)
         guard celsius >= -40.0, celsius <= 120.0 else { return nil }
         return celsius
     }
@@ -429,22 +499,24 @@ final class SmartBatteryReader: SmartBatteryReadingProvider, @unchecked Sendable
     }
 
     /// Parses temperature across macOS formats:
+    /// - Centi-Celsius (`100...10_000`, e.g. `2759` -> `27.59°C`, `3769` -> `37.69°C`) in `BatteryData`/`Pack.BatteryData`
+    ///   `Temperature` and `VirtualTemperature` (preferred first).
     /// - Centi-Kelvin (`>= 20_000`, e.g. `31084` -> `37.69°C`) on top-level `AppleSmartBattery.Temperature`.
-    /// - Centi-Celsius (`100...10_000`, e.g. `2759` -> `27.59°C`, `3769` -> `37.69°C`) in `BatteryData.Temperature`.
+    /// - SMBus deci-Kelvin (`2500...3900`, e.g. `2882` -> `15.05°C`, `3182` -> `45.05°C`) on top-level
+    ///   `AppleSmartBattery.Temperature` on Intel Macs and older macOS.
     static func parseTemperatureC(
         topLevel: [String: Any],
         batteryData: [String: Any]?,
         packBatteryData: [String: Any]?
     ) -> Double? {
-        let candidates: [Int?] = [
-            IOKitHelpers.extractInt(topLevel, key: "Temperature"),
+        let nestedCandidates: [Int?] = [
             batteryData.flatMap { IOKitHelpers.extractInt($0, key: "Temperature") },
             packBatteryData.flatMap { IOKitHelpers.extractInt($0, key: "Temperature") },
             batteryData.flatMap { IOKitHelpers.extractInt($0, key: "VirtualTemperature") },
             packBatteryData.flatMap { IOKitHelpers.extractInt($0, key: "VirtualTemperature") }
         ]
 
-        for candidate in candidates {
+        for candidate in nestedCandidates {
             guard let raw = candidate, raw > 0 else { continue }
             let celsius: Double
             if raw >= 20_000 {
@@ -458,6 +530,23 @@ final class SmartBatteryReader: SmartBatteryReadingProvider, @unchecked Sendable
                 return celsius
             }
         }
+
+        if let raw = IOKitHelpers.extractInt(topLevel, key: "Temperature"), raw > 0 {
+            let celsius: Double?
+            if raw >= 20_000 {
+                celsius = Double(raw) / 100.0 - 273.15
+            } else if (2500...3900).contains(raw) {
+                celsius = Double(raw) / 10.0 - 273.15
+            } else if raw >= 100 && raw <= 10_000 {
+                celsius = Double(raw) / 100.0
+            } else {
+                celsius = nil
+            }
+            if let celsius, celsius >= -10.0 && celsius <= 100.0 {
+                return celsius
+            }
+        }
+
         return nil
     }
 
@@ -493,24 +582,71 @@ final class SmartBatteryReader: SmartBatteryReadingProvider, @unchecked Sendable
 
     // MARK: - Cell Topology (AppleSmartBatteryBank + Legacy Fallback)
 
-    private func readCellTopology(
+    private func resolveCellTopology(
+        includeCellTopology: Bool,
         batteryProperties: [String: Any],
         packProperties: [String: Any]?
     ) -> BatteryCellTopology? {
-        let bankEntries = IOKitHelpers.copyAllIOServiceProperties(className: "AppleSmartBatteryBank")
-        if !bankEntries.isEmpty {
-            let cellEntries = IOKitHelpers.copyAllIOServiceProperties(className: "AppleSmartBatteryCell")
-            if let topology = Self.parseBankCellTopology(
-                bankProperties: bankEntries,
-                cellProperties: cellEntries
-            ) {
-                return topology
-            }
-        }
-
         let batteryData = IOKitHelpers.extractDict(batteryProperties, key: "BatteryData")
             ?? packProperties.flatMap { IOKitHelpers.extractDict($0, key: "BatteryData") }
-        return Self.parseLegacyCellTopology(batteryData: batteryData)
+        let batteryIdentity = IOKitHelpers.extractString(batteryProperties, key: "Serial")
+            ?? IOKitHelpers.extractString(batteryProperties, key: "BatterySerialNumber")
+            ?? batteryData.flatMap { IOKitHelpers.extractString($0, key: "Serial") }
+            ?? ""
+
+        lock.lock()
+        let cached: BatteryCellTopology? = (cachedTopologyBatteryKey == batteryIdentity)
+            ? cachedCellTopology
+            : nil
+        lock.unlock()
+
+        if let cached {
+            return Self.refreshCachedTopology(cached, from: batteryData)
+        }
+
+        guard includeCellTopology else {
+            return nil
+        }
+
+        let discovered = bankTopologyProvider()
+            ?? Self.parseLegacyCellTopology(batteryData: batteryData)
+
+        if let discovered {
+            lock.lock()
+            cachedTopologyBatteryKey = batteryIdentity
+            cachedCellTopology = discovered
+            lock.unlock()
+        }
+
+        return discovered
+    }
+
+    private static func refreshCachedTopology(
+        _ cached: BatteryCellTopology,
+        from batteryData: [String: Any]?
+    ) -> BatteryCellTopology {
+        guard let batteryData else { return cached }
+        let liveVoltages = (IOKitHelpers.extractIntArray(batteryData, key: "CellVoltage") ?? [])
+            .filter { $0 > 0 }
+        let liveQmax = (IOKitHelpers.extractIntArray(batteryData, key: "Qmax") ?? [])
+            .filter { $0 > 0 }
+        guard !liveVoltages.isEmpty || !liveQmax.isEmpty else { return cached }
+        return BatteryCellTopology(
+            seriesCount: cached.seriesCount,
+            parallelCount: cached.parallelCount,
+            voltagesMV: liveVoltages.isEmpty ? cached.voltagesMV : liveVoltages,
+            qmaxMAh: liveQmax.isEmpty ? cached.qmaxMAh : liveQmax
+        )
+    }
+
+    private static func readBankCellTopologyFromIOKit() -> BatteryCellTopology? {
+        let bankEntries = IOKitHelpers.copyAllIOServiceProperties(className: "AppleSmartBatteryBank")
+        guard !bankEntries.isEmpty else { return nil }
+        let cellEntries = IOKitHelpers.copyAllIOServiceProperties(className: "AppleSmartBatteryCell")
+        return parseBankCellTopology(
+            bankProperties: bankEntries,
+            cellProperties: cellEntries
+        )
     }
 
     static func parseBankCellTopology(

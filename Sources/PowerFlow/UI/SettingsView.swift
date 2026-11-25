@@ -16,6 +16,10 @@ struct SettingsView: View {
         self.monitor = monitor
     }
 
+    init(monitor: PowerMonitor) {
+        self.init(settingsStore: monitor.settingsStore, monitor: monitor)
+    }
+
     private var language: AppLanguage { settingsStore.settings.appLanguage }
 
     private var appVersion: String {
@@ -40,7 +44,11 @@ struct SettingsView: View {
             .formStyle(.grouped)
         }
         .frame(width: Self.windowSize.width, height: Self.windowSize.height)
+        .environment(\.locale, PowerFlowTheme.locale(for: language))
         .onAppear {
+            settingsStore.refreshLaunchAtLoginStatus()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             settingsStore.refreshLaunchAtLoginStatus()
         }
     }
@@ -70,23 +78,12 @@ struct SettingsView: View {
                     .font(.system(size: 14.5, weight: .semibold))
                     .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme, contrast: colorSchemeContrast))
 
-                Text("\(appVersion) · \(L10n.label(for: monitor.snapshot.telemetrySource, language: language))")
-                    .font(PowerFlowTheme.Typography.captionFloor)
-                    .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
-                    .lineLimit(1)
+                SettingsTelemetrySubtitle(monitor: monitor, appVersion: appVersion, language: language)
             }
 
             Spacer(minLength: 8)
 
-            PowerFlowChip(
-                icon: monitor.snapshot.isEffectivelyOnAC ? "bolt.fill" : "battery.75percent",
-                text: monitor.snapshot.isDataAvailable
-                    ? PowerFormatters.percent(monitor.snapshot.batteryPercent)
-                    : L10n.string(.flowUnknown, language: language),
-                tint: monitor.snapshot.isEffectivelyOnAC
-                    ? PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
-                    : PowerFlowTheme.themeBlue(for: colorScheme, contrast: colorSchemeContrast)
-            )
+            SettingsBatteryStatusChip(monitor: monitor, language: language)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
@@ -118,7 +115,7 @@ struct SettingsView: View {
                             style: style,
                             title: L10n.label(for: style, language: language),
                             displayMode: settingsStore.settings.menuBarDisplayMode,
-                            snapshot: monitor.snapshot,
+                            monitor: monitor,
                             isSelected: settingsStore.settings.batteryIconStyle == style
                         ) {
                             if reduceMotion {
@@ -186,6 +183,25 @@ struct SettingsView: View {
                 isOn: $settingsStore.launchAtLogin
             )
 
+            if settingsStore.launchAtLoginRequiresApproval {
+                HStack(alignment: .center, spacing: 8) {
+                    Label(
+                        L10n.string(.launchAtLoginRequiresApproval, language: language),
+                        systemImage: "exclamationmark.circle.fill"
+                    )
+                    .font(PowerFlowTheme.Typography.captionFloor)
+                    .foregroundStyle(PowerFlowTheme.dischargeAmber(for: colorScheme, contrast: colorSchemeContrast))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer(minLength: 4)
+
+                    Button(L10n.string(.openLoginItemsSettings, language: language)) {
+                        settingsStore.openLoginItemsSettings()
+                    }
+                    .controlSize(.small)
+                }
+            }
+
             if let error = settingsStore.launchAtLoginError, !error.isEmpty {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(PowerFlowTheme.Typography.captionFloor)
@@ -233,9 +249,7 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
                 HStack {
-                    Text(L10n.label(for: monitor.snapshot.telemetrySource, language: language))
-                        .font(PowerFlowTheme.Typography.captionFloor)
-                        .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
+                    SettingsTelemetrySourceLabel(monitor: monitor, language: language)
 
                     Spacer()
 
@@ -251,6 +265,59 @@ struct SettingsView: View {
     }
 }
 
+// MARK: - Live Snapshot Leaf Subviews (Isolate Observation From Grouped Form)
+
+private struct SettingsTelemetrySubtitle: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+
+    let monitor: PowerMonitor
+    let appVersion: String
+    let language: AppLanguage
+
+    var body: some View {
+        Text("\(appVersion) · \(L10n.label(for: monitor.snapshot.telemetrySource, language: language))")
+            .font(PowerFlowTheme.Typography.captionFloor)
+            .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
+            .lineLimit(1)
+    }
+}
+
+private struct SettingsBatteryStatusChip: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+
+    let monitor: PowerMonitor
+    let language: AppLanguage
+
+    var body: some View {
+        let snapshot = monitor.snapshot
+        PowerFlowChip(
+            icon: snapshot.isEffectivelyOnAC ? "bolt.fill" : "battery.75percent",
+            text: snapshot.isDataAvailable
+                ? PowerFormatters.percent(snapshot.batteryPercent)
+                : L10n.string(.flowUnknown, language: language),
+            tint: snapshot.isEffectivelyOnAC
+                ? PowerFlowTheme.chargeGreen(for: colorScheme, contrast: colorSchemeContrast)
+                : PowerFlowTheme.themeBlue(for: colorScheme, contrast: colorSchemeContrast)
+        )
+    }
+}
+
+private struct SettingsTelemetrySourceLabel: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+
+    let monitor: PowerMonitor
+    let language: AppLanguage
+
+    var body: some View {
+        Text(L10n.label(for: monitor.snapshot.telemetrySource, language: language))
+            .font(PowerFlowTheme.Typography.captionFloor)
+            .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
+    }
+}
+
 // MARK: - Interactive Battery Icon Style Preview Card
 
 private struct BatteryIconStylePreviewCard: View {
@@ -261,13 +328,13 @@ private struct BatteryIconStylePreviewCard: View {
     let style: BatteryIconStyle
     let title: String
     let displayMode: MenuBarDisplayMode
-    let snapshot: PowerSnapshot
+    let monitor: PowerMonitor
     let isSelected: Bool
     let action: () -> Void
 
     @State private var isHovered = false
 
-    private var renderSpec: BatteryIconRenderSpec {
+    private func renderSpec(for snapshot: PowerSnapshot) -> BatteryIconRenderSpec {
         if snapshot.isDataAvailable {
             return NativeBatteryIconRenderer.spec(
                 for: snapshot,
@@ -286,7 +353,7 @@ private struct BatteryIconStylePreviewCard: View {
         )
     }
 
-    private var previewTitle: String {
+    private func previewTitle(for snapshot: PowerSnapshot) -> String {
         if snapshot.isDataAvailable {
             return StatusItemController.makeMenuBarTitle(snapshot: snapshot, mode: displayMode, style: style)
         }
@@ -323,10 +390,12 @@ private struct BatteryIconStylePreviewCard: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+        let snapshot = monitor.snapshot
 
         Button(action: action) {
             VStack(spacing: 6.5) {
-                miniMenuBarChrome
+                miniMenuBarChrome(for: snapshot)
+                    .accessibilityHidden(true)
 
                 HStack(spacing: 5) {
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
@@ -336,6 +405,7 @@ private struct BatteryIconStylePreviewCard: View {
                                 ? Color.accentColor
                                 : PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
                         )
+                        .accessibilityHidden(true)
 
                     Text(title)
                         .font(PowerFlowTheme.Typography.rowLabel)
@@ -372,31 +442,25 @@ private struct BatteryIconStylePreviewCard: View {
                 }
             }
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
     }
 
-    private var miniMenuBarChrome: some View {
-        let spec = renderSpec
+    private func miniMenuBarChrome(for snapshot: PowerSnapshot) -> some View {
+        let spec = renderSpec(for: snapshot)
         let renderedImage = NativeBatteryIconRenderer.render(spec: spec)
-        let effectiveCaption = previewTitle.isEmpty
-            ? (snapshot.isDataAvailable ? PowerFormatters.percent(snapshot.batteryPercent) : "82%")
-            : previewTitle
-
-        let showExternalCaption = !previewTitle.isEmpty || !(displayMode.showsPercentage && style.drawsPercentInsideIcon)
+        let titleText = previewTitle(for: snapshot)
+        let showExternalCaption = !titleText.isEmpty
 
         return HStack(spacing: 5.5) {
             Spacer(minLength: 4)
 
             if showExternalCaption {
-                Text(effectiveCaption)
+                Text(titleText)
                     .font(.system(size: 11, weight: .regular))
                     .monospacedDigit()
-                    .foregroundStyle(
-                        previewTitle.isEmpty
-                            ? PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
-                            : PowerFlowTheme.primaryValue(for: colorScheme, contrast: colorSchemeContrast)
-                    )
+                    .foregroundStyle(PowerFlowTheme.primaryValue(for: colorScheme, contrast: colorSchemeContrast))
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }

@@ -79,4 +79,23 @@ final class OutboundPortGateTests: XCTestCase {
         XCTAssertEqual(snapshot.netSystemLoadW, snapshot.totalSystemLoadW)
         XCTAssertEqual(snapshot.physicalPorts.first?.role, .dataOnly)
     }
+
+    func testMissingLivePortOutputsHoldsOpenPortsWithinHoldWindow() {
+        let gate = OutboundPortGate()
+        let initial = gate.filter([port(5.0, index: 2)], at: start, hasLivePortOutputs: true)
+        XCTAssertEqual(initial.map(\.portIndex), [2])
+
+        // Non-full SMC sample (hasLivePortOutputs == false) within 3s must not wipe a <60s live port.
+        let held = gate.filter([], at: start.addingTimeInterval(1.0), hasLivePortOutputs: false)
+        XCTAssertEqual(held.map(\.portIndex), [2])
+        XCTAssertEqual(held[0].powerW, 5.0, accuracy: 0.001)
+
+        // Resuming live readings with a 0.12W draw (>= closeWatts) stays open because state wasn't wiped.
+        let resumed = gate.filter([port(0.12, index: 2)], at: start.addingTimeInterval(1.5), hasLivePortOutputs: true)
+        XCTAssertEqual(resumed.map(\.portIndex), [2])
+
+        // Past holdSeconds with hasLivePortOutputs == false, the port expires cleanly.
+        let expired = gate.filter([], at: start.addingTimeInterval(5.0), hasLivePortOutputs: false)
+        XCTAssertTrue(expired.isEmpty)
+    }
 }

@@ -214,7 +214,16 @@ enum PowerFlowTheme {
         }
     }
 
-    // MARK: - Hardware Symbols
+    // MARK: - Locale & Hardware Symbols
+
+    static func locale(for language: AppLanguage) -> Locale {
+        switch L10n.resolvedLanguage(for: language) {
+        case .simplifiedChinese:
+            return Locale(identifier: "zh_Hans")
+        case .english, .system:
+            return Locale(identifier: "en_US")
+        }
+    }
 
     static func batterySymbol(percent: Int, isCharging: Bool) -> String {
         if isCharging {
