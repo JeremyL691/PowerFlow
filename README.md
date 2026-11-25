@@ -9,6 +9,7 @@ A native macOS menu bar utility for real-time Apple Silicon power flow, battery 
 - **Native macOS Battery Icon**: Reproduces Apple's menu bar battery in the outlined or the solid macOS 27 design (selectable in Settings), using the system's own glyphs and rules for the charging bolt, plug, Low Power Mode yellow and low-battery red.
 - **Live Power Flow Diagram**: Charger, battery, Mac and USB-C devices as connected nodes with animated links whose thickness and speed follow the power — hybrid supply, charging, battery-only, bypass and draining to a charge limit while plugged in.
 - **Real-Time USB-C Output and System Charge Limit**: Per-port outbound power refreshed every second, and the charge limit macOS itself enforces.
+- **Optional Energy Tab**: Live hardware power distribution bar (SoC, Display, USB-C, Other) and top user app/process kernel energy rankings (`rusage_info_v6` + power assertions), sampled strictly while the Energy tab is open with zero root, zero subprocesses, and zero disk writes.
 - **Bilingual UI**: Full English and Simplified Chinese (`简体中文`) localization with live runtime switching.
 
 ## Requirements

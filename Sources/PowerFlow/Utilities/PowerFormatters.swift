@@ -40,6 +40,132 @@ enum PowerFormatters {
         return "\(Int(clamped))W"
     }
 
+    static func adaptiveWatts(_ value: Double) -> String {
+        guard value.isFinite, value >= 0 else { return "—" }
+        if value < 0.0005 {
+            return "0 W"
+        }
+        if value < 0.9995 {
+            let milliwatts = Int((value * 1000.0).rounded())
+            return "\(milliwatts) mW"
+        }
+        if value < 9.995 {
+            return String(format: "%.2f W", locale: posixLocale, value)
+        }
+        return String(format: "%.1f W", locale: posixLocale, value)
+    }
+
+    static func cpuPercent(_ value: Double) -> String {
+        guard value.isFinite, value >= 0 else { return "—" }
+        if value < 0.05 {
+            return "0%"
+        }
+        if value < 99.95 {
+            return String(format: "%.1f%%", locale: posixLocale, value)
+        }
+        let clamped = min(value.rounded(), maxSafeIntDouble)
+        return "\(Int(clamped))%"
+    }
+
+    static func energyImpact(_ value: Double) -> String {
+        guard value.isFinite, value >= 0 else { return "—" }
+        if value < 0.05 {
+            return "0"
+        }
+        if value < 99.95 {
+            return String(format: "%.1f", locale: posixLocale, value)
+        }
+        let clamped = min(value.rounded(), maxSafeIntDouble)
+        return integerGrouped(Int(clamped))
+    }
+
+    static func wakeupsPerSecond(_ value: Double) -> String {
+        guard value.isFinite, value >= 0 else { return "—" }
+        if value < 0.5 {
+            return "0/s"
+        }
+        if value < 999.5 {
+            return "\(Int(value.rounded()))/s"
+        }
+        if value < 99_950.0 {
+            return String(format: "%.1fk/s", locale: posixLocale, value / 1_000.0)
+        }
+        if value < 999_500.0 {
+            return "\(Int((value / 1_000.0).rounded()))k/s"
+        }
+        let millions = value / 1_000_000.0
+        if millions < 999.95 {
+            return String(format: "%.1fM/s", locale: posixLocale, millions)
+        }
+        let clamped = min(millions.rounded(), maxSafeIntDouble)
+        return "\(integerGrouped(Int(clamped)))M/s"
+    }
+
+    static func byteRate(_ bytesPerSecond: Double) -> String {
+        guard bytesPerSecond.isFinite, bytesPerSecond >= 0 else { return "—" }
+        if bytesPerSecond < 0.5 {
+            return "0 B/s"
+        }
+        return "\(formatBinaryBytes(bytesPerSecond))/s"
+    }
+
+    static func memoryBytes(_ bytes: UInt64) -> String {
+        if bytes == 0 {
+            return "0 B"
+        }
+        if bytes < 1024 {
+            return "\(bytes) B"
+        }
+        return formatBinaryBytes(Double(bytes))
+    }
+
+    private static func formatBinaryBytes(_ value: Double) -> String {
+        let kb = 1024.0
+        let mb = kb * 1024.0
+        let gb = mb * 1024.0
+        let tb = gb * 1024.0
+
+        if value < kb - 0.5 {
+            return "\(Int(value.rounded())) B"
+        }
+        if value < mb {
+            let scaled = value / kb
+            if scaled < 99.95 {
+                return String(format: "%.1f KB", locale: posixLocale, scaled)
+            }
+            if scaled < 1023.5 {
+                return "\(Int(scaled.rounded())) KB"
+            }
+            return "1.0 MB"
+        }
+        if value < gb {
+            let scaled = value / mb
+            if scaled < 99.95 {
+                return String(format: "%.1f MB", locale: posixLocale, scaled)
+            }
+            if scaled < 1023.5 {
+                return "\(Int(scaled.rounded())) MB"
+            }
+            return "1.0 GB"
+        }
+        if value < tb {
+            let scaled = value / gb
+            if scaled < 99.95 {
+                return String(format: "%.1f GB", locale: posixLocale, scaled)
+            }
+            if scaled < 1023.5 {
+                return "\(Int(scaled.rounded())) GB"
+            }
+            return "1.0 TB"
+        }
+        let scaled = value / tb
+        if scaled < 99.95 {
+            return String(format: "%.1f TB", locale: posixLocale, scaled)
+        }
+        let clamped = min(scaled.rounded(), maxSafeIntDouble)
+        return "\(integerGrouped(Int(clamped))) TB"
+    }
+
     static func wattHours(_ wh: Double?, decimals: Int = 1) -> String {
         guard let wh, wh.isFinite, wh >= 0 else { return "—" }
         let clean = normalizeZero(wh, decimals: decimals)

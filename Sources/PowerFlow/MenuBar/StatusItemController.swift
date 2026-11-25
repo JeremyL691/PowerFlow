@@ -139,8 +139,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
     }
 
     private func computePopoverMaxHeight() -> CGFloat {
-        let visibleHeight = (statusItem.button?.window?.screen ?? NSScreen.main)?.visibleFrame.height ?? 800
-        return max(360, visibleHeight - 24)
+        let screen = statusItem.button?.window?.screen ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        let availableBelowButton: CGFloat
+        if let buttonWindow = statusItem.button?.window {
+            let belowButton = buttonWindow.frame.minY - visibleFrame.minY
+            availableBelowButton = belowButton > 100 ? min(visibleFrame.height, belowButton) : visibleFrame.height
+        } else {
+            availableBelowButton = visibleFrame.height
+        }
+        // Leave vertical headroom for NSPopover's arrow (~13pt), window shadow/chrome, and bottom
+        // screen margin so AppKit never runs out of .minY space and flips the popover sideways.
+        return max(360, floor(availableBelowButton - 72))
     }
 
     private func makePopoverView(maxHeight: CGFloat) -> MenuBarPopoverView {
@@ -197,18 +207,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
                     return
                 }
                 self.lastTargetPopoverSize = targetSize
-
                 self.syncPopoverAnimation()
-                if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-                    self.popover.contentSize = targetSize
-                } else {
-                    NSAnimationContext.runAnimationGroup { context in
-                        context.duration = 0.22
-                        context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
-                        context.allowsImplicitAnimation = true
-                        self.popover.contentSize = targetSize
-                    }
-                }
+                self.popover.contentSize = targetSize
             }
         }
         return hostingController
@@ -530,6 +530,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate, NSWindowDelegate 
 
         isClosingProgrammatically = false
         syncPopoverAnimation()
+        let savedTab = UserDefaults.standard.string(forKey: "popoverDetailTab")
+        monitor.setEnergyTabVisible(savedTab == PopoverDetailTab.energy.rawValue)
         monitor.setPopoverVisible(true)
 
         popover.contentViewController = makePopoverContent()

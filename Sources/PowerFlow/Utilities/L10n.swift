@@ -123,6 +123,30 @@ enum L10n {
         case sourceIOKitTelemetry
         case sourceIOKitLegacy
         case sourceUnavailable
+
+        // Energy Dashboard
+        case energyDashboard
+        case energyByApp
+        case energyByProcess
+        case energySegmentSoC
+        case energySegmentDisplay
+        case energySegmentOutbound
+        case energySegmentOther
+        case energySampling
+        case energyNoActiveConsumers
+        case energyImpact
+        case energyCPU
+        case energyPCoreShare
+        case energyWakeups
+        case energyDiskIO
+        case energyMemory
+        case energyPreventingSleep
+        case energyProcessesSection
+        case openActivityMonitor
+        case energyScopeFootnote
+        case settingsEnergyDashboard
+        case settingsShowEnergyDashboard
+        case settingsEnergyDashboardLimit
     }
 
     static func resolvedLanguage(for setting: AppLanguage) -> AppLanguage {
@@ -265,6 +289,30 @@ enum L10n {
         case .sourceIOKitTelemetry: return "IOKit Telemetry"
         case .sourceIOKitLegacy: return "IOKit"
         case .sourceUnavailable: return isZh ? "不可用" : "Unavailable"
+
+        // Energy Dashboard
+        case .energyDashboard: return isZh ? "能耗看板" : "Energy Dashboard"
+        case .energyByApp: return isZh ? "应用" : "Apps"
+        case .energyByProcess: return isZh ? "进程" : "Processes"
+        case .energySegmentSoC: return isZh ? "芯片" : "SoC"
+        case .energySegmentDisplay: return isZh ? "屏幕" : "Display"
+        case .energySegmentOutbound: return "USB-C"
+        case .energySegmentOther: return isZh ? "其他" : "Other"
+        case .energySampling: return isZh ? "正在采样进程能耗…" : "Sampling process energy…"
+        case .energyNoActiveConsumers: return isZh ? "当前无显著耗电进程" : "No significant active energy consumers"
+        case .energyImpact: return isZh ? "能耗影响" : "Energy Impact"
+        case .energyCPU: return "CPU"
+        case .energyPCoreShare: return isZh ? "性能核占比" : "P-Core Share"
+        case .energyWakeups: return isZh ? "空闲唤醒" : "Idle Wakeups"
+        case .energyDiskIO: return isZh ? "磁盘读写" : "Disk I/O"
+        case .energyMemory: return isZh ? "内存占用" : "Memory"
+        case .energyPreventingSleep: return isZh ? "阻止休眠" : "Preventing Sleep"
+        case .energyProcessesSection: return isZh ? "包含进程" : "Processes"
+        case .openActivityMonitor: return isZh ? "打开活动监视器" : "Open Activity Monitor"
+        case .energyScopeFootnote: return isZh ? "应用功耗为 CPU 与芯片归因功耗；屏幕与外设功耗见上方硬件分布。" : "App power reflects CPU & SoC attributed energy; display and peripherals appear above."
+        case .settingsEnergyDashboard: return isZh ? "能耗标签页" : "Energy Tab"
+        case .settingsShowEnergyDashboard: return isZh ? "显示「能耗」标签页" : "Show Energy Tab"
+        case .settingsEnergyDashboardLimit: return isZh ? "显示排行数量" : "Top Consumers Shown"
         }
     }
 
@@ -380,5 +428,58 @@ enum L10n {
         case .serious: return string(.thermalSerious, language: language)
         case .critical: return string(.thermalCritical, language: language)
         }
+    }
+
+    static func label(for limit: EnergyDashboardItemLimit, language: AppLanguage = .system) -> String {
+        switch limit {
+        case .top3: return tr("Top 3", zh: "前 3 项", language: language)
+        case .top5: return tr("Top 5", zh: "前 5 项", language: language)
+        case .top8: return tr("Top 8", zh: "前 8 项", language: language)
+        }
+    }
+
+    static func label(for segment: HardwareEnergySegmentKind, language: AppLanguage = .system) -> String {
+        switch segment {
+        case .soc: return string(.energySegmentSoC, language: language)
+        case .display: return string(.energySegmentDisplay, language: language)
+        case .outbound: return string(.energySegmentOutbound, language: language)
+        case .other: return string(.energySegmentOther, language: language)
+        }
+    }
+
+    static func label(for mode: EnergyGroupingMode, language: AppLanguage = .system) -> String {
+        switch mode {
+        case .byApp: return string(.energyByApp, language: language)
+        case .byProcess: return string(.energyByProcess, language: language)
+        }
+    }
+
+    static func sleepAssertionDescription(_ types: [String], language: AppLanguage = .system) -> String {
+        var descriptions: [String] = []
+        var seen: Set<String> = []
+
+        for rawType in types {
+            let trimmed = rawType.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let mapped: String
+            switch trimmed {
+            case "PreventUserIdleDisplaySleep", "NoDisplaySleepAssertion":
+                mapped = tr("Preventing display sleep", zh: "阻止显示器休眠", language: language)
+            case "PreventUserIdleSystemSleep", "NoIdleSleepAssertion":
+                mapped = tr("Preventing idle sleep", zh: "阻止空闲休眠", language: language)
+            case "PreventSystemSleep":
+                mapped = tr("Preventing system sleep", zh: "阻止系统休眠", language: language)
+            default:
+                mapped = trimmed
+            }
+            if seen.insert(mapped).inserted {
+                descriptions.append(mapped)
+            }
+        }
+
+        guard !descriptions.isEmpty else {
+            return string(.energyPreventingSleep, language: language)
+        }
+        return descriptions.joined(separator: " · ")
     }
 }

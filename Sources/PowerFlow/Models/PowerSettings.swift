@@ -52,6 +52,8 @@ struct PowerSettings: Codable, Equatable, Hashable, Sendable {
     var temperatureUnit: TemperatureUnit
     var maskSerialNumbers: Bool
     var appLanguage: AppLanguage
+    var showEnergyDashboard: Bool
+    var energyDashboardLimit: EnergyDashboardItemLimit
 
     static let `default` = PowerSettings(
         menuBarDisplayMode: .iconOnly,
@@ -59,7 +61,9 @@ struct PowerSettings: Codable, Equatable, Hashable, Sendable {
         liveRefreshInterval: .standard,
         temperatureUnit: .celsius,
         maskSerialNumbers: false,
-        appLanguage: .system
+        appLanguage: .system,
+        showEnergyDashboard: true,
+        energyDashboardLimit: .top5
     )
 
     init(
@@ -68,7 +72,9 @@ struct PowerSettings: Codable, Equatable, Hashable, Sendable {
         liveRefreshInterval: LiveRefreshInterval = .standard,
         temperatureUnit: TemperatureUnit = .celsius,
         maskSerialNumbers: Bool = false,
-        appLanguage: AppLanguage = .system
+        appLanguage: AppLanguage = .system,
+        showEnergyDashboard: Bool = true,
+        energyDashboardLimit: EnergyDashboardItemLimit = .top5
     ) {
         self.menuBarDisplayMode = menuBarDisplayMode
         self.batteryIconStyle = batteryIconStyle
@@ -76,6 +82,8 @@ struct PowerSettings: Codable, Equatable, Hashable, Sendable {
         self.temperatureUnit = temperatureUnit
         self.maskSerialNumbers = maskSerialNumbers
         self.appLanguage = appLanguage
+        self.showEnergyDashboard = showEnergyDashboard
+        self.energyDashboardLimit = energyDashboardLimit
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -85,6 +93,8 @@ struct PowerSettings: Codable, Equatable, Hashable, Sendable {
         case temperatureUnit
         case maskSerialNumbers
         case appLanguage
+        case showEnergyDashboard
+        case energyDashboardLimit
     }
 
     /// Decodes field by field so one unknown or retired value never discards the other settings.
@@ -100,6 +110,8 @@ struct PowerSettings: Codable, Equatable, Hashable, Sendable {
         self.temperatureUnit = value(.temperatureUnit, default: defaults.temperatureUnit)
         self.maskSerialNumbers = value(.maskSerialNumbers, default: defaults.maskSerialNumbers)
         self.appLanguage = value(.appLanguage, default: defaults.appLanguage)
+        self.showEnergyDashboard = value(.showEnergyDashboard, default: defaults.showEnergyDashboard)
+        self.energyDashboardLimit = value(.energyDashboardLimit, default: defaults.energyDashboardLimit)
     }
 }
 

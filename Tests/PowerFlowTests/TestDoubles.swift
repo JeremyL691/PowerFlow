@@ -150,6 +150,72 @@ final class MockIOPortReader: IOPortReadingProvider, @unchecked Sendable {
     }
 }
 
+final class MockProcessEnergyReader: ProcessEnergyReadingProvider, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _samples: [RawProcessEnergySample]
+    private var _queuedResponses: [[RawProcessEnergySample]]
+    private var _provider: (@Sendable () -> [RawProcessEnergySample])?
+    private var _readCount = 0
+
+    init(samples: [RawProcessEnergySample] = []) {
+        self._samples = samples
+        self._queuedResponses = []
+        self._provider = nil
+    }
+
+    init(queuedResponses: [[RawProcessEnergySample]], fallback: [RawProcessEnergySample] = []) {
+        self._samples = fallback
+        self._queuedResponses = queuedResponses
+        self._provider = nil
+    }
+
+    init(provider: @escaping @Sendable () -> [RawProcessEnergySample]) {
+        self._samples = []
+        self._queuedResponses = []
+        self._provider = provider
+    }
+
+    var readCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _readCount
+    }
+
+    func setSamples(_ samples: [RawProcessEnergySample]) {
+        lock.lock()
+        _samples = samples
+        _queuedResponses.removeAll()
+        _provider = nil
+        lock.unlock()
+    }
+
+    func enqueue(_ samples: [RawProcessEnergySample]) {
+        lock.lock()
+        _queuedResponses.append(samples)
+        lock.unlock()
+    }
+
+    func resetCounters() {
+        lock.lock()
+        _readCount = 0
+        lock.unlock()
+    }
+
+    func readProcessSamples() -> [RawProcessEnergySample] {
+        lock.lock()
+        _readCount += 1
+        if !_queuedResponses.isEmpty {
+            let next = _queuedResponses.removeFirst()
+            lock.unlock()
+            return next
+        }
+        let provider = _provider
+        let fallback = _samples
+        lock.unlock()
+        return provider?() ?? fallback
+    }
+}
+
 struct SilentSMCKeyReader: SMCKeyReading {
     func readKey(_ key: String) -> SMCValue? {
         nil

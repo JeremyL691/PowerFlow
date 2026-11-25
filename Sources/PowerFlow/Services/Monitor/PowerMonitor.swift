@@ -13,11 +13,16 @@ final class PowerMonitor {
     /// Coalesced follow-up refresh offsets after plug/unplug events so AC handshake (3.0s)
     /// and unplug debounce (1.5s) converge smoothly even in zero-polling dormant mode.
     static let plugEventBurstOffsets: [TimeInterval] = [0.2, 0.8, 2.0, 3.2]
+    /// One-shot delay after T0 baseline on popover open so the Energy Dashboard
+    /// transitions from `.warmingUp` to `.ready` rapidly without a redundant hardware scan.
+    static let energyWarmupDelay: TimeInterval = 0.35
 
     private(set) var snapshot: PowerSnapshot = .empty
+    private(set) var energySnapshot: EnergySnapshot = .empty
     let settingsStore: PowerSettingsStore
     private(set) var isLiveStreaming: Bool = false
     private(set) var isPopoverVisible: Bool = false
+    private(set) var isEnergyTabVisible: Bool = true
     private(set) var activePollingTier: PowerPollingTier = .suspended
 
     @ObservationIgnored private let smartBatteryReader: any SmartBatteryReadingProvider
@@ -25,6 +30,8 @@ final class PowerMonitor {
     @ObservationIgnored private let smcReader: SMCReader
     @ObservationIgnored private let notifier: any PowerEventNotifying
     @ObservationIgnored private let resolver: PowerFlowResolver
+    @ObservationIgnored private let processEnergyReader: any ProcessEnergyReadingProvider
+    @ObservationIgnored private let energyAggregator: ProcessEnergyAggregator
     @ObservationIgnored private let clock: @Sendable () -> Date
     @ObservationIgnored private let lowPowerModeProvider: @Sendable () -> Bool
     @ObservationIgnored private let thermalStateProvider: @Sendable () -> ProcessInfo.ThermalState
@@ -46,6 +53,7 @@ final class PowerMonitor {
     @ObservationIgnored private var timer: DispatchSourceTimer?
     @ObservationIgnored private var burstWorkItems: [DispatchWorkItem] = []
     @ObservationIgnored private var burstEndUptime: TimeInterval = -.greatestFiniteMagnitude
+    @ObservationIgnored private var energyWarmupWorkItem: DispatchWorkItem?
 
     var hasActiveTimer: Bool {
         timer != nil
@@ -53,6 +61,16 @@ final class PowerMonitor {
 
     var hasPendingBurstRefreshes: Bool {
         uptimeProvider() < burstEndUptime
+    }
+
+    private var shouldSampleProcessEnergy: Bool {
+        isStarted
+            && !isSystemAsleep
+            && !isScreenAsleep
+            && isPopoverVisible
+            && isEnergyTabVisible
+            && settingsStore.settings.showEnergyDashboard
+            && activePollingTier.includesFullHardwareScan
     }
 
     init(
@@ -66,7 +84,9 @@ final class PowerMonitor {
         lowPowerModeProvider: @escaping @Sendable () -> Bool = { ProcessInfo.processInfo.isLowPowerModeEnabled },
         thermalStateProvider: @escaping @Sendable () -> ProcessInfo.ThermalState = { ProcessInfo.processInfo.thermalState },
         isDisplayAsleepProvider: @escaping @Sendable () -> Bool = { CGDisplayIsAsleep(CGMainDisplayID()) != 0 },
-        uptimeProvider: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+        uptimeProvider: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        processEnergyReader: any ProcessEnergyReadingProvider = ProcessEnergyReader(),
+        energyAggregator: ProcessEnergyAggregator = ProcessEnergyAggregator()
     ) {
         self.settingsStore = settingsStore
         self.smartBatteryReader = smartBatteryReader
@@ -74,6 +94,8 @@ final class PowerMonitor {
         self.smcReader = smcReader
         self.notifier = notifier ?? PowerSourceNotifier()
         self.resolver = resolver
+        self.processEnergyReader = processEnergyReader
+        self.energyAggregator = energyAggregator
         self.clock = clock
         self.lowPowerModeProvider = lowPowerModeProvider
         self.thermalStateProvider = thermalStateProvider
@@ -112,6 +134,7 @@ final class PowerMonitor {
         notifier.stop()
         cancelTimer()
         cancelBurstRefreshes()
+        resetEnergyMonitoring()
         activePollingTier = .suspended
         isLiveStreaming = false
     }
@@ -124,6 +147,7 @@ final class PowerMonitor {
             includePortTopology: uiVisible,
             fullSMC: uiVisible,
             includeChargeLimit: uiVisible,
+            includeProcessEnergy: shouldSampleProcessEnergy,
             restartBurstsOnPlugChange: false
         )
     }
@@ -132,6 +156,13 @@ final class PowerMonitor {
         guard isPopoverVisible != visible else { return }
         isPopoverVisible = visible
         reconfigureScheduling(triggerImmediateRefresh: visible, forcePortScanOnImmediate: visible)
+    }
+
+    func setEnergyTabVisible(_ visible: Bool) {
+        guard isEnergyTabVisible != visible else { return }
+        isEnergyTabVisible = visible
+        guard isStarted else { return }
+        syncEnergyMonitoring(baselineIncludedInImmediateSample: false)
     }
 
     /// Synchronously captures a full live hardware snapshot (used by `--dump-snapshot`).
@@ -216,6 +247,7 @@ final class PowerMonitor {
                 includePortTopology: uiVisible,
                 fullSMC: uiVisible,
                 includeChargeLimit: uiVisible,
+                includeProcessEnergy: false,
                 restartBurstsOnPlugChange: true
             )
 
@@ -228,6 +260,7 @@ final class PowerMonitor {
                 includePortTopology: uiVisible,
                 fullSMC: uiVisible,
                 includeChargeLimit: uiVisible,
+                includeProcessEnergy: false,
                 restartBurstsOnPlugChange: false
             )
 
@@ -235,12 +268,14 @@ final class PowerMonitor {
             isSystemAsleep = true
             cancelTimer()
             cancelBurstRefreshes()
+            resetEnergyMonitoring()
             reconfigureScheduling(triggerImmediateRefresh: false, forcePortScanOnImmediate: false)
 
         case .screensDidSleep:
             isScreenAsleep = true
             cancelTimer()
             cancelBurstRefreshes()
+            resetEnergyMonitoring()
             reconfigureScheduling(triggerImmediateRefresh: false, forcePortScanOnImmediate: false)
 
         case .systemDidWake:
@@ -308,6 +343,7 @@ final class PowerMonitor {
                         includePortTopology: false,
                         fullSMC: false,
                         includeChargeLimit: false,
+                        includeProcessEnergy: false,
                         restartBurstsOnPlugChange: true
                     )
                 }
@@ -327,7 +363,10 @@ final class PowerMonitor {
             }
         }
 
-        if triggerImmediateRefresh && newTier != .suspended {
+        let willRunImmediateHardwareSample = triggerImmediateRefresh && newTier != .suspended
+        syncEnergyMonitoring(baselineIncludedInImmediateSample: willRunImmediateHardwareSample)
+
+        if willRunImmediateHardwareSample {
             let uiVisible = isPopoverVisible
             let includeDetails = uiVisible || forcePortScanOnImmediate
             scheduleAsyncSample(
@@ -336,9 +375,58 @@ final class PowerMonitor {
                 includePortTopology: includeDetails,
                 fullSMC: includeDetails,
                 includeChargeLimit: includeDetails,
+                includeProcessEnergy: shouldSampleProcessEnergy,
                 restartBurstsOnPlugChange: false
             )
         }
+    }
+
+    private func syncEnergyMonitoring(baselineIncludedInImmediateSample: Bool) {
+        if shouldSampleProcessEnergy {
+            let session = workerState.currentEnergySession()
+            if !session.active {
+                cancelEnergyWarmup()
+                energyAggregator.reset()
+                let generation = workerState.beginEnergySession()
+                if !baselineIncludedInImmediateSample {
+                    scheduleImmediateEnergyOnlySample(generation: generation)
+                }
+                scheduleEnergyWarmup(generation: generation)
+            }
+        } else {
+            resetEnergyMonitoring()
+        }
+    }
+
+    private func resetEnergyMonitoring() {
+        cancelEnergyWarmup()
+        _ = workerState.endEnergySession()
+        energyAggregator.reset()
+        if energySnapshot != .empty {
+            energySnapshot = .empty
+        }
+    }
+
+    private func scheduleImmediateEnergyOnlySample(generation: UInt64) {
+        let handler = makeEnergyOnlySampleClosure(expectedGeneration: generation)
+        Self.enqueueTelemetryWork(on: telemetryQueue, handler: handler)
+    }
+
+    private func scheduleEnergyWarmup(generation: UInt64) {
+        cancelEnergyWarmup()
+        let handler = makeEnergyOnlySampleClosure(expectedGeneration: generation)
+        let item = Self.makeTelemetryWorkItem(handler: handler)
+        energyWarmupWorkItem = item
+        Self.enqueueTelemetryWork(
+            on: telemetryQueue,
+            after: Self.energyWarmupDelay,
+            workItem: item
+        )
+    }
+
+    private func cancelEnergyWarmup() {
+        energyWarmupWorkItem?.cancel()
+        energyWarmupWorkItem = nil
     }
 
     private func startTimer(
@@ -355,6 +443,7 @@ final class PowerMonitor {
             includePortTopology: fullHardwareScan,
             fullSMC: fullHardwareScan,
             includeChargeLimit: fullHardwareScan,
+            includeProcessEnergy: fullHardwareScan,
             restartBurstsOnPlugChange: false
         )
         timer = Self.makeTelemetryTimer(
@@ -385,6 +474,7 @@ final class PowerMonitor {
                 includePortTopology: true,
                 fullSMC: true,
                 includeChargeLimit: includeCells,
+                includeProcessEnergy: false,
                 restartBurstsOnPlugChange: false
             )
             let item = Self.makeTelemetryWorkItem(handler: handler)
@@ -407,6 +497,7 @@ final class PowerMonitor {
         includePortTopology: Bool,
         fullSMC: Bool,
         includeChargeLimit: Bool,
+        includeProcessEnergy: Bool,
         restartBurstsOnPlugChange: Bool
     ) {
         let handler = makeSampleClosure(
@@ -415,6 +506,7 @@ final class PowerMonitor {
             includePortTopology: includePortTopology,
             fullSMC: fullSMC,
             includeChargeLimit: includeChargeLimit,
+            includeProcessEnergy: includeProcessEnergy,
             restartBurstsOnPlugChange: restartBurstsOnPlugChange
         )
         Self.enqueueTelemetryWork(on: telemetryQueue, handler: handler)
@@ -428,6 +520,7 @@ final class PowerMonitor {
         includePortTopology: Bool,
         fullSMC: Bool,
         includeChargeLimit: Bool,
+        includeProcessEnergy: Bool,
         restartBurstsOnPlugChange: Bool
     ) -> @Sendable () -> Void {
         { [weak self] in
@@ -437,8 +530,17 @@ final class PowerMonitor {
                 includePortTopology: includePortTopology,
                 fullSMC: fullSMC,
                 includeChargeLimit: includeChargeLimit,
+                includeProcessEnergy: includeProcessEnergy,
                 restartBurstsOnPlugChange: restartBurstsOnPlugChange
             )
+        }
+    }
+
+    private nonisolated func makeEnergyOnlySampleClosure(
+        expectedGeneration: UInt64
+    ) -> @Sendable () -> Void {
+        { [weak self] in
+            self?.performEnergyOnlySampleOnTelemetryQueue(expectedGeneration: expectedGeneration)
         }
     }
 
@@ -486,6 +588,7 @@ final class PowerMonitor {
         includePortTopology: Bool,
         fullSMC: Bool,
         includeChargeLimit: Bool,
+        includeProcessEnergy: Bool,
         restartBurstsOnPlugChange: Bool
     ) {
         let now = clock()
@@ -552,13 +655,62 @@ final class PowerMonitor {
             hasLivePortOutputs: fullSMC
         )
 
+        let energyResult: (snapshot: EnergySnapshot, generation: UInt64)?
+        if includeProcessEnergy {
+            let session = workerState.currentEnergySession()
+            if session.active {
+                let rawSamples = processEnergyReader.readProcessSamples()
+                let postReadSession = workerState.currentEnergySession()
+                if postReadSession.active && postReadSession.generation == session.generation {
+                    let aggregated = energyAggregator.ingest(samples: rawSamples, at: now)
+                    energyResult = (aggregated, session.generation)
+                } else {
+                    energyResult = nil
+                }
+            } else {
+                energyResult = nil
+            }
+        } else {
+            energyResult = nil
+        }
+
         Task { @MainActor [weak self] in
             guard let self, self.isStarted else { return }
             self.snapshot = resolved
+            if let energyResult,
+               self.shouldSampleProcessEnergy,
+               self.workerState.currentEnergySession().generation == energyResult.generation
+            {
+                self.energySnapshot = energyResult.snapshot
+            }
             guard !self.activePollingTier.includesFullHardwareScan else { return }
             if plugChanged || (isInTransition && !self.hasPendingBurstRefreshes) {
                 self.schedulePlugEventBursts()
             }
+        }
+    }
+
+    private nonisolated func performEnergyOnlySampleOnTelemetryQueue(expectedGeneration: UInt64) {
+        let session = workerState.currentEnergySession()
+        guard session.active, session.generation == expectedGeneration else { return }
+
+        let now = clock()
+        let rawSamples = processEnergyReader.readProcessSamples()
+
+        let postReadSession = workerState.currentEnergySession()
+        guard postReadSession.active, postReadSession.generation == expectedGeneration else { return }
+
+        let aggregated = energyAggregator.ingest(samples: rawSamples, at: now)
+
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.isStarted,
+                  self.shouldSampleProcessEnergy,
+                  self.workerState.currentEnergySession().generation == expectedGeneration
+            else {
+                return
+            }
+            self.energySnapshot = aggregated
         }
     }
 
@@ -569,6 +721,11 @@ final class PowerMonitor {
             let phase: PowerConnectionPhase
             let externalConnectedChanged: Bool
             let isInTransition: Bool
+        }
+
+        struct EnergySessionState: Sendable {
+            let active: Bool
+            let generation: UInt64
         }
 
         private struct AdapterTopologyFingerprint: Equatable, Sendable {
@@ -591,6 +748,33 @@ final class PowerMonitor {
         private var portTopologyCache: [IOPortTopologyEntry] = []
         private var lastPortTopologyScanDate: Date?
         private var lastAdapterFingerprint: AdapterTopologyFingerprint?
+        private var isEnergySessionActive = false
+        private var energySessionGeneration: UInt64 = 0
+
+        func beginEnergySession() -> UInt64 {
+            lock.lock()
+            defer { lock.unlock() }
+            energySessionGeneration &+= 1
+            isEnergySessionActive = true
+            return energySessionGeneration
+        }
+
+        func endEnergySession() -> UInt64 {
+            lock.lock()
+            defer { lock.unlock() }
+            energySessionGeneration &+= 1
+            isEnergySessionActive = false
+            return energySessionGeneration
+        }
+
+        func currentEnergySession() -> EnergySessionState {
+            lock.lock()
+            defer { lock.unlock() }
+            return EnergySessionState(
+                active: isEnergySessionActive,
+                generation: energySessionGeneration
+            )
+        }
 
         func advanceConnectionPhase(
             isExternalConnected: Bool,

@@ -17,25 +17,24 @@ struct MenuBarPopoverView: View {
     @State private var hasAppeared = false
     @State private var contentHeight: CGFloat = 0
     @AppStorage("popoverDetailTab") private var detailTab: PopoverDetailTab = .battery
+    @AppStorage("popoverEnergyGroupingMode") private var energyGroupingMode: EnergyGroupingMode = .byApp
 
     private var snapshot: PowerSnapshot { monitor.snapshot }
     private var settings: PowerSettings { monitor.settingsStore.settings }
     private var language: AppLanguage { settings.appLanguage }
     private var needsScrolling: Bool { contentHeight > maxHeight + 0.5 }
+    private var activeDetailTab: PopoverDetailTab {
+        (detailTab == .energy && !settings.showEnergyDashboard) ? .battery : detailTab
+    }
 
     var body: some View {
-        Group {
-            if needsScrolling {
-                ScrollView(.vertical) {
-                    measuredSections
-                }
-                .scrollIndicators(.never)
-                .frame(height: maxHeight)
-            } else {
-                measuredSections
-            }
+        ScrollView(.vertical) {
+            measuredSections
         }
-        .frame(width: Self.width)
+        .scrollIndicators(.never)
+        .scrollDisabled(!needsScrolling)
+        .fixedSize(horizontal: false, vertical: !needsScrolling)
+        .frame(width: Self.width, height: needsScrolling ? maxHeight : nil)
         .background(alignment: .topLeading) {
             ambientAura
         }
@@ -43,11 +42,21 @@ struct MenuBarPopoverView: View {
         .environment(\.locale, PowerFlowTheme.locale(for: language))
         .onAppear {
             hasAppeared = true
+            monitor.setEnergyTabVisible(activeDetailTab == .energy)
+        }
+        .onChange(of: activeDetailTab) { _, tab in
+            monitor.setEnergyTabVisible(tab == .energy)
         }
         .onChange(of: reduceMotion) { _, reduced in
             if reduced {
                 hasAppeared = true
             }
+        }
+        .onChange(of: settings.showEnergyDashboard) { _, enabled in
+            if !enabled && detailTab == .energy {
+                detailTab = .battery
+            }
+            monitor.setEnergyTabVisible(activeDetailTab == .energy)
         }
     }
 
@@ -101,6 +110,7 @@ struct MenuBarPopoverView: View {
 
             DetailTabBar(
                 selection: $detailTab,
+                showEnergyTab: settings.showEnergyDashboard,
                 isOnAC: snapshot.isEffectivelyOnAC,
                 ratedAdapterWatts: snapshot.activeAdapter?.ratedWatts ?? 0,
                 outboundPortCount: snapshot.outboundPorts.count,
@@ -460,9 +470,17 @@ struct MenuBarPopoverView: View {
 
     private var detailPanel: some View {
         Group {
-            switch detailTab {
+            switch activeDetailTab {
             case .battery:
                 BatteryPanel(snapshot: snapshot, settings: settings)
+            case .energy:
+                EnergyDashboardSection(
+                    monitor: monitor,
+                    powerSnapshot: snapshot,
+                    groupingMode: $energyGroupingMode,
+                    limit: settings.energyDashboardLimit,
+                    language: language
+                )
             case .charger:
                 ChargerPanel(snapshot: snapshot, settings: settings, isVisible: true)
             case .output:
@@ -470,9 +488,9 @@ struct MenuBarPopoverView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .id(detailTab)
+        .id(activeDetailTab)
         .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 4)))
-        .animation(reduceMotion ? PowerFlowTheme.Motion.reducedFade : PowerFlowTheme.Motion.tab, value: detailTab)
+        .animation(reduceMotion ? PowerFlowTheme.Motion.reducedFade : PowerFlowTheme.Motion.tab, value: activeDetailTab)
         .padding(12)
         .powerFlowSurface(.tile(), cornerRadius: 14)
     }

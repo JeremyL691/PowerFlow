@@ -37,6 +37,7 @@ struct SettingsView: View {
             Divider()
             Form {
                 menuBarSection
+                energyDashboardSection
                 generalSection
                 privacySection
                 aboutSection
@@ -152,6 +153,28 @@ struct SettingsView: View {
             }
         } header: {
             Text(L10n.string(.settingsMenuBar, language: language))
+        }
+    }
+
+    private var energyDashboardSection: some View {
+        Section {
+            Toggle(
+                L10n.string(.settingsShowEnergyDashboard, language: language),
+                isOn: $settingsStore.settings.showEnergyDashboard
+            )
+
+            Picker(
+                L10n.string(.settingsEnergyDashboardLimit, language: language),
+                selection: $settingsStore.settings.energyDashboardLimit
+            ) {
+                ForEach(EnergyDashboardItemLimit.allCases) { limit in
+                    Text(L10n.label(for: limit, language: language))
+                        .tag(limit)
+                }
+            }
+            .disabled(!settingsStore.settings.showEnergyDashboard)
+        } header: {
+            Text(L10n.string(.settingsEnergyDashboard, language: language))
         }
     }
 

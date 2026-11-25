@@ -2,13 +2,14 @@ import SwiftUI
 
 enum PopoverDetailTab: String, CaseIterable, Identifiable {
     case battery
+    case energy
     case charger
     case output
 
     var id: String { rawValue }
 }
 
-/// Battery / Charger / Output picker: a capsule track whose selection indicator is a shape —
+/// Battery / Energy / Charger / Output picker: a capsule track whose selection indicator is a shape —
 /// morphing Liquid Glass on macOS 26, a sliding capsule below.
 struct DetailTabBar: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -16,6 +17,7 @@ struct DetailTabBar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @Binding var selection: PopoverDetailTab
+    let showEnergyTab: Bool
     let isOnAC: Bool
     let ratedAdapterWatts: Double
     let outboundPortCount: Int
@@ -24,9 +26,29 @@ struct DetailTabBar: View {
     @Namespace private var namespace
     @State private var hoveredTab: PopoverDetailTab?
 
+    init(
+        selection: Binding<PopoverDetailTab>,
+        showEnergyTab: Bool = true,
+        isOnAC: Bool,
+        ratedAdapterWatts: Double,
+        outboundPortCount: Int,
+        language: AppLanguage
+    ) {
+        self._selection = selection
+        self.showEnergyTab = showEnergyTab
+        self.isOnAC = isOnAC
+        self.ratedAdapterWatts = ratedAdapterWatts
+        self.outboundPortCount = outboundPortCount
+        self.language = language
+    }
+
+    private var visibleTabs: [PopoverDetailTab] {
+        showEnergyTab ? PopoverDetailTab.allCases : PopoverDetailTab.allCases.filter { $0 != .energy }
+    }
+
     private var chargerBadge: String? {
         guard isOnAC, ratedAdapterWatts.isFinite, ratedAdapterWatts > 0.5 else { return nil }
-        return "\(Int(ratedAdapterWatts.rounded())) W"
+        return "\(Int(ratedAdapterWatts.rounded()))W"
     }
 
     private var outputBadge: String? {
@@ -35,7 +57,7 @@ struct DetailTabBar: View {
 
     private func badge(for tab: PopoverDetailTab) -> String? {
         switch tab {
-        case .battery: return nil
+        case .battery, .energy: return nil
         case .charger: return chargerBadge
         case .output: return outputBadge
         }
@@ -44,6 +66,7 @@ struct DetailTabBar: View {
     private func icon(for tab: PopoverDetailTab) -> String {
         switch tab {
         case .battery: return "battery.100percent"
+        case .energy: return "flame.fill"
         case .charger: return "powerplug.fill"
         case .output: return "arrow.up.right.circle.fill"
         }
@@ -52,6 +75,7 @@ struct DetailTabBar: View {
     private func title(for tab: PopoverDetailTab) -> String {
         switch tab {
         case .battery: return L10n.string(.battery, language: language)
+        case .energy: return L10n.tr("Energy", zh: "能耗", language: language)
         case .charger: return L10n.tr("Charger", zh: "充电器", language: language)
         case .output: return L10n.tr("Output", zh: "输出", language: language)
         }
@@ -82,7 +106,7 @@ struct DetailTabBar: View {
 
     private func tabRow(usesGlassSelection: Bool) -> some View {
         HStack(spacing: 0) {
-            ForEach(PopoverDetailTab.allCases) { tab in
+            ForEach(visibleTabs) { tab in
                 tabButton(tab, usesGlassSelection: usesGlassSelection)
             }
         }
@@ -175,21 +199,25 @@ private struct DetailTabButton: View {
             : PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast)
 
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 Image(systemName: icon)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10.5, weight: .semibold))
                 Text(title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 11.5, weight: .semibold))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .allowsTightening(true)
                 if let badge {
                     Text(badge)
-                        .font(.system(size: 11))
+                        .font(.system(size: 10.5))
                         .monospacedDigit()
                         .foregroundStyle(PowerFlowTheme.mutedLabel(for: colorScheme, contrast: colorSchemeContrast))
                         .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
             .foregroundStyle(labelColor)
+            .padding(.horizontal, 4)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Capsule())
         }
